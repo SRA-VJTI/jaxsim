@@ -27,7 +27,7 @@
 
 import ast
 import copy
-import imp
+import importlib.util
 import inspect
 import math
 import os
@@ -900,14 +900,14 @@ class Adjoint:
                 else:
                     raise KeyError("Referencing undefined symbol: " + str(node.id))
 
-            elif (isinstance(node, ast.Num)):
-
-                # lookup constant, if it has already been assigned then return existing var
-                # if (node.n in adj.symbols):
-                #     return adj.symbols[node.n]
-                # else:
+            elif (isinstance(node, ast.Num) if hasattr(ast, 'Num') else False):
+                # Python 3.7/3.8 - ast.Num has .n attribute
                 out = adj.add_constant(node.n)
-                #adj.symbols[node.n] = out
+                return out
+
+            elif (isinstance(node, ast.Constant) and isinstance(node.value, (int, float))):
+                # Python 3.9+ - numeric constants use ast.Constant with .value
+                out = adj.add_constant(node.value)
                 return out
 
             elif (isinstance(node, ast.BinOp)):
@@ -933,18 +933,34 @@ class Adjoint:
                 if (len(node.iter.args) != 2):
                     raise Exception("For loop ranges must be of form range(start, end) with both start and end specified and no skip specifier.")
 
+                # Helper to check if node is a numeric constant
+                def is_constant_num(n):
+                    if hasattr(ast, 'Num') and isinstance(n, ast.Num):
+                        return True
+                    if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)):
+                        return True
+                    return False
+
+                # Helper to get numeric value from constant node
+                def get_constant_value(n):
+                    if hasattr(ast, 'Num') and isinstance(n, ast.Num):
+                        return n.n
+                    if isinstance(n, ast.Constant):
+                        return n.value
+                    raise ValueError("Not a constant node")
+
                 # check if loop range is compile time constant
                 unroll = True
                 for a in node.iter.args:
-                    if (isinstance(a, ast.Num) == False):
+                    if not is_constant_num(a):
                         unroll = False
                         break
 
                 if (unroll):
 
                     # constant loop, unroll
-                    start = node.iter.args[0].n
-                    end = node.iter.args[1].n
+                    start = get_constant_value(node.iter.args[0])
+                    end = get_constant_value(node.iter.args[1])
 
                     for i in range(start, end):
 
@@ -1010,13 +1026,21 @@ class Adjoint:
                 target = adj.eval(node.value)
 
                 indices = []
-                if isinstance(node.slice.value, ast.Num):
-                    var = adj.eval(node.slice.value)
-                    indices.append(var)
-                else:
-                    for arg in node.slice.value.elts:
+                # Python 3.9+ changed AST: node.slice is the index directly
+                # Python 3.8 and earlier: node.slice is an Index node with .value
+                slice_node = node.slice
+                # Handle Python 3.8's ast.Index wrapper
+                if hasattr(ast, 'Index') and isinstance(slice_node, ast.Index):
+                    slice_node = slice_node.value
+
+                # Check if it's a single numeric index or a tuple of indices
+                if isinstance(slice_node, ast.Tuple):
+                    for arg in slice_node.elts:
                         var = adj.eval(arg)
                         indices.append(var)
+                else:
+                    var = adj.eval(slice_node)
+                    indices.append(var)
 
                 out = adj.add_call(functions["index"], [target, *indices])
                 return out
@@ -1569,13 +1593,31 @@ def set_build_env():
 
 
 def import_module(module_name, path):
-
     # https://stackoverflow.com/questions/67631/how-to-import-a-module-given-the-full-path
-    file, path, description = imp.find_module(module_name, [path])
+    import sys
+    import os
 
-    # Close the .so file after load.
-    with file:
-        return imp.load_module(module_name, file, path, description)
+    # Find the module file
+    module_path = os.path.join(path, module_name + '.so')
+    if not os.path.exists(module_path):
+        # Try other extensions
+        for ext in ['.pyd', '.cpython-311-x86_64-linux-gnu.so']:
+            candidate = os.path.join(path, module_name + ext)
+            if os.path.exists(candidate):
+                module_path = candidate
+                break
+        else:
+            # Search for any matching .so file
+            for f in os.listdir(path):
+                if f.startswith(module_name) and (f.endswith('.so') or f.endswith('.pyd')):
+                    module_path = os.path.join(path, f)
+                    break
+
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def rename(name, return_type):

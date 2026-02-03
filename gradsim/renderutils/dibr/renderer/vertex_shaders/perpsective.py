@@ -58,6 +58,6 @@ def perspective_projection(points_bxpx3, faces_fx3, cameras):
     v02_bxfx3 = pf2_bxfx3 - pf0_bxfx3
 
     # bs cannot be 3, if it is 3, we must specify dim
-    normal_bxfx3 = torch.cross(v01_bxfx3, v02_bxfx3, dim=2)
+    normal_bxfx3 = torch.linalg.cross(v01_bxfx3, v02_bxfx3, dim=2)
 
     return points3d_bxfx9, points2d_bxfx6, normal_bxfx3

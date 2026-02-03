@@ -71,7 +71,7 @@ def multiply(q1, q2):
     return torch.cat(
         (
             r1 * r2 - torch.matmul(v1.view(1, 3), v2.view(3, 1)).view(-1),
-            r1 * v2 + r2 * v1 + torch.cross(v1, v2),
+            r1 * v2 + r2 * v1 + torch.linalg.cross(v1, v2),
         ),
         dim=0,
     )

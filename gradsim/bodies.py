@@ -238,7 +238,7 @@ class RigidBody(object):
                 )
                 mask = mask.scatter_(0, inds, 1.0)
                 force_per_point = force_per_point + mask * force_vector.view(1, 3)
-                torque_per_point = torque_per_point + torch.cross(
+                torque_per_point = torque_per_point + torch.linalg.cross(
                     self.vertices - self.position.view(1, 3), force_per_point
                 )
             else:

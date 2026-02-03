@@ -7,8 +7,8 @@ from setuptools import find_packages, setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 PACKAGE_NAME = "gradsim"
-VERSION = "0.0.2"
-DESCRIPTION = "gradsim: A differentiable 2D physics simulator"
+VERSION = "0.0.4"
+DESCRIPTION = "gradsim: Differentiable simulation for system identification and visuomotor control"
 URL = "<url.to.go.in.here>"
 AUTHOR = "Krishna Murthy Jatavallabhula"
 LICENSE = "(TBD)"
@@ -133,23 +133,17 @@ def get_extensions():
 
 def get_requirements():
     return [
-        "torch",
-        "black",
-        "flake8",
-        "h5py",
-        "imageio",
-        "isort",
-        "matplotlib",
+        "torch>=1.3.0",
         "numpy",
         "Pillow",
-        "py3ode",
-        "pygame",
-        "pytest>=4.6",
-        "pytest-cov>=2.7",
+        "imageio",
         "pyyaml",
-        "sphinx==2.2.0",  # pinned to resolve issue with docutils 0.16b0.dev
-        "torchdiffeq",
+        "h5py",
         "tqdm",
+        "matplotlib",
+        "pygame",
+        "torchdiffeq",
+        # py3ode is optional - requires system ODE library (libode-dev)
     ]
 
 
@@ -167,7 +161,7 @@ if __name__ == "__main__":
             "This means the SoftRas, the texture loader, and the voxelization won't work."
         )
 
-    build_deps()  # Build USD bindings
+    # build_deps()  # Build USD bindings (run ./buildusd.sh manually if needed)
 
     setup(
         # Metadata
@@ -178,7 +172,7 @@ if __name__ == "__main__":
         url=URL,
         long_description=LONG_DESCRIPTION,
         licence=LICENSE,
-        python_requires=">3.6",
+        python_requires=">=3.9",
         # Package info
         packages=find_packages(exclude=("docs", "test", "examples")),
         install_requires=get_requirements(),

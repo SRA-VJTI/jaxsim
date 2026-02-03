@@ -266,7 +266,7 @@ def compute_directional_light(
     # Compute face normals.
     v10 = face_vertices[:, :, 0] - face_vertices[:, :, 1]
     v12 = face_vertices[:, :, 2] - face_vertices[:, :, 1]
-    normals = F.normalize(torch.cross(v12, v10), p=2, dim=2, eps=1e-6)
+    normals = F.normalize(torch.linalg.cross(v12, v10), p=2, dim=2, eps=1e-6)
     # Reshape, to get back the batchsize dimension.
     normals = normals.reshape(batchsize, num_faces, 3)
 

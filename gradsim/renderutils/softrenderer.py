@@ -520,8 +520,8 @@ class SoftRenderer(object):
         # eps is chosen as 1e-5 because that's what the authors use
         # in their (Chainer) implementation
         z_axis = F.normalize(at - eye, eps=1e-5)
-        x_axis = F.normalize(torch.cross(up, z_axis), eps=1e-5)
-        y_axis = F.normalize(torch.cross(z_axis, x_axis), eps=1e-5)
+        x_axis = F.normalize(torch.linalg.cross(up, z_axis), eps=1e-5)
+        y_axis = F.normalize(torch.linalg.cross(z_axis, x_axis), eps=1e-5)
 
         # Create rotation matrices
         R = torch.cat(
@@ -583,8 +583,8 @@ class SoftRenderer(object):
 
         # Create new axes
         z_axis = F.normalize(direction, eps=1e-5)
-        x_axis = F.normalize(torch.cross(up, z_axis), eps=1e-5)
-        y_axis = F.normalize(torch.cross(z_axis, x_axis), eps=1e-5)
+        x_axis = F.normalize(torch.linalg.cross(up, z_axis), eps=1e-5)
+        y_axis = F.normalize(torch.linalg.cross(z_axis, x_axis), eps=1e-5)
 
         # Create rotation matrix (B x 3 x 3)
         R = torch.cat(
