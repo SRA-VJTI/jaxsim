@@ -1,6 +1,6 @@
 from abc import abstractmethod
 
-import torch
+import jax.numpy as jnp
 
 
 class ExternalForce(object):
@@ -17,24 +17,20 @@ class ExternalForce(object):
         magnitude=10.0,
         starttime=0.0,
         endtime=1e5,
-        dtype=torch.float32,
-        device=torch.device("cpu"),
     ):
         r"""Initialize an external force object with the specified direction and
         magnitude.
 
         Args:
-            direction (torch.Tensor): Direction of the applied force
+            direction (jnp.ndarray): Direction of the applied force
                 (shape: :math:`(3)`).
-            magnitude (float): Magnitude of the applied force (default: 100.0).
+            magnitude (float): Magnitude of the applied force (default: 10.0).
             starttime (float): Time (in seconds) at which the force is first applied
                 (default: 0.0).
             endtime (float): Time (in seconds) at which the force stops being applied
                 (default: 1e5).
-            dtype (torch.dtype): `dtype` attribute of the `direction` variable.
-            device (torch.device): `device` attribute of the `direction` variable.
         """
-        self.direction = direction.to(dtype).to(device)
+        self.direction = jnp.asarray(direction)
         self.magnitude = magnitude
         self.starttime = starttime
         self.endtime = endtime
@@ -64,10 +60,8 @@ class ConstantForce(ExternalForce):
         magnitude=10.0,
         starttime=0.0,
         endtime=1e5,
-        dtype=torch.float32,
-        device=torch.device("cpu"),
     ):
-        super().__init__(direction, magnitude, starttime, endtime, dtype, device)
+        super().__init__(direction, magnitude, starttime, endtime)
 
     def force_function(self, time):
         return self.direction * self.magnitude
@@ -82,16 +76,14 @@ class Gravity(ConstantForce):
         magnitude=10.0,
         starttime=0.0,
         endtime=1e5,
-        dtype=torch.float32,
-        device=torch.device("cpu"),
     ):
         if direction is None:
-            direction = torch.tensor([0.0, 0.0, -1.0], dtype=dtype, device=device)
-        super().__init__(direction, magnitude, starttime, endtime, dtype, device)
+            direction = jnp.array([0.0, 0.0, -1.0])
+        super().__init__(direction, magnitude, starttime, endtime)
 
 
 class XForce(ConstantForce):
-    """A constant, downward force. """
+    """A constant force along the X-axis. """
 
     def __init__(
         self,
@@ -99,16 +91,14 @@ class XForce(ConstantForce):
         magnitude=10.0,
         starttime=0.0,
         endtime=1e5,
-        dtype=torch.float32,
-        device=torch.device("cpu"),
     ):
         if direction is None:
-            direction = torch.tensor([1.0, 0.0, 0.0], dtype=dtype, device=device)
-        super().__init__(direction, magnitude, starttime, endtime, dtype, device)
+            direction = jnp.array([1.0, 0.0, 0.0])
+        super().__init__(direction, magnitude, starttime, endtime)
 
 
 class YForce(ConstantForce):
-    """A constant, downward force. """
+    """A constant force along the Y-axis. """
 
     def __init__(
         self,
@@ -116,9 +106,7 @@ class YForce(ConstantForce):
         magnitude=10.0,
         starttime=0.0,
         endtime=1e5,
-        dtype=torch.float32,
-        device=torch.device("cpu"),
     ):
         if direction is None:
-            direction = torch.tensor([0.0, 1.0, 0.0], dtype=dtype, device=device)
-        super().__init__(direction, magnitude, starttime, endtime, dtype, device)
+            direction = jnp.array([0.0, 1.0, 0.0])
+        super().__init__(direction, magnitude, starttime, endtime)
