@@ -1,4 +1,4 @@
-import torch
+import jax.numpy as jnp
 
 from .utils.defaults import Defaults
 
@@ -8,26 +8,27 @@ def detect_ground_plane_contacts(vertices_world, eps=Defaults.EPSILON):
     vertices (usually --- belonging to a single mesh).
 
     Args:
-        vertices_world (torch.Tensor): Set of vertices whose collisions with
+        vertices_world (jnp.ndarray): Set of vertices whose collisions with
             the ground plane (assumed to be the XZ-plane) are to be detected.
         eps (float): Contact detection threshold (i.e., distance below which
             two bodies will be considered penetrating).
 
     Returns:
-        contact_inds (torch.Tensor): Indices of contact vertices.
-        contact_points (torch.Tensor): Positions of contact vertices.
-        contact_normals (torch.Tensor): Normals of contact (i.e., ground-plane
+        contact_inds (jnp.ndarray): Indices of contact vertices.
+        contact_points (jnp.ndarray): Positions of contact vertices.
+        contact_normals (jnp.ndarray): Normals of contact (i.e., ground-plane
             normals here).
     """
     if eps < 0:
         raise ValueError(f"eps cannot be negative! Got: {eps}")
-    contact_inds = torch.nonzero((vertices_world < eps)[..., 1]).view(-1)
+    mask = (vertices_world[:, 1] < eps)
+    contact_inds = jnp.where(mask)[0]
     contact_points, contact_normals = None, None
-    if contact_inds.numel() > 0:
+    if contact_inds.size > 0:
         contact_points = vertices_world[contact_inds]
-        contact_normals = torch.tensor(
-            [0.0, 1.0, 0.0], dtype=vertices_world.dtype, device=vertices_world.device
-        ).repeat(contact_inds.numel(), 1)
+        contact_normals = jnp.tile(
+            jnp.array([0.0, 1.0, 0.0]), (contact_inds.shape[0], 1)
+        )
     else:
         contact_inds = None
 

@@ -1,9 +1,9 @@
-import torch
+import jax.numpy as jnp
 
 
-def assert_tensor(var, varname):
-    r"""Assert that the variable is of type torch.Tensor. """
-    if not torch.is_tensor(var):
+def assert_array(var, varname):
+    r"""Assert that the variable is a JAX array (jnp.ndarray)."""
+    if not isinstance(var, jnp.ndarray):
         raise TypeError(
-            f"Expected {varname} of type torch.Tensor. Got {type(var)} instead."
+            f"Expected {varname} of type jnp.ndarray. Got {type(var)} instead."
         )
