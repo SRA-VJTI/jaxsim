@@ -1,6 +1,6 @@
-import torch
+import jax.numpy as jnp
 
-from .utils.asserts import assert_tensor
+from .utils.asserts import assert_array
 from .utils.defaults import Defaults
 from .utils.quaternion import multiply, normalize, quaternion_to_rotmat
 
@@ -25,31 +25,30 @@ class RigidBody(object):
         color=(255, 0, 0),
         thickness=1,
     ):
-        assert_tensor(vertices, "vertices")
+        assert_array(vertices, "vertices")
         self.dtype = vertices.dtype
-        self.device = vertices.device
 
         # Initialize defaults wherever input params are None.
         if masses is None:
-            masses = torch.ones(vertices.shape[0], dtype=self.dtype, device=self.device)
+            masses = jnp.ones(vertices.shape[0], dtype=self.dtype)
         if position is None:
-            position = torch.zeros(3, dtype=self.dtype, device=self.device)
+            position = jnp.zeros(3, dtype=self.dtype)
         if orientation is None:
-            orientation = torch.tensor(
-                [1.0, 0.0, 0.0, 0.0], dtype=self.dtype, device=self.device
+            orientation = jnp.array(
+                [1.0, 0.0, 0.0, 0.0], dtype=self.dtype
             )
         if linear_momentum is None:
-            linear_momentum = torch.zeros(3, dtype=self.dtype, device=self.device)
+            linear_momentum = jnp.zeros(3, dtype=self.dtype)
         if angular_momentum is None:
-            angular_momentum = torch.zeros(3, dtype=self.dtype, device=self.device)
+            angular_momentum = jnp.zeros(3, dtype=self.dtype)
 
-        # Assert that desired params are wrapped as torch.Tensor objects.
-        assert_tensor(masses, "masses")
-        assert_tensor(position, "position")
-        assert_tensor(orientation, "orientation")
-        assert_tensor(linear_momentum, "linear_momentum")
-        assert_tensor(angular_momentum, "angular_momentum")
-        if vertices.dim() != 2 or vertices.shape[-1] != 3:
+        # Assert that desired params are wrapped as jnp.ndarray objects.
+        assert_array(masses, "masses")
+        assert_array(position, "position")
+        assert_array(orientation, "orientation")
+        assert_array(linear_momentum, "linear_momentum")
+        assert_array(angular_momentum, "angular_momentum")
+        if vertices.ndim != 2 or vertices.shape[-1] != 3:
             raise ValueError(
                 "vertices must have two dimensions, and the last dimension must"
                 f" be of shape 3. Got shape {vertices.shape} instead."
@@ -57,13 +56,12 @@ class RigidBody(object):
 
         # Translate vertices such that center-of-mass is at origin.
         com = self.compute_center_of_mass(vertices, masses)
-        vertices = vertices - com.view(-1, 3)
+        vertices = vertices - com.reshape(-1, 3)
         self.vertices = vertices
         self.masses = masses
         self.mass = masses.sum()  # Overall mass of the rigid body
 
         # State variables
-        # self.position = self.compute_center_of_mass(self.vertices, self.masses)
         self.position = position
         self.orientation = orientation
         self.linear_momentum = linear_momentum
@@ -74,15 +72,15 @@ class RigidBody(object):
         # Body-frame inertia tensor.
         self.inertia_body = self.compute_inertia_body(self.vertices, self.masses)
         # Inverse of body-frame inertia tensor.
-        self.inertia_body_inv = self.inertia_body.inverse()
+        self.inertia_body_inv = jnp.linalg.inv(self.inertia_body)
         # Inverse of inertia tensor in world frame.
         self.inertia_world_inv = self.compute_inertia_world(
             self.inertia_body_inv, quaternion_to_rotmat(self.orientation),
         )
-        self.linear_velocity = torch.zeros(3, dtype=self.dtype, device=self.device)
-        self.angular_velocity = torch.zeros(3, dtype=self.dtype, device=self.device)
-        self.force_vector = torch.zeros(3, dtype=self.dtype, device=self.device)
-        self.torque_vector = torch.zeros(3, dtype=self.dtype, device=self.device)
+        self.linear_velocity = jnp.zeros(3, dtype=self.dtype)
+        self.angular_velocity = jnp.zeros(3, dtype=self.dtype)
+        self.force_vector = jnp.zeros(3, dtype=self.dtype)
+        self.torque_vector = jnp.zeros(3, dtype=self.dtype)
 
         # Friction coefficient
         self.friction_coefficient = None
@@ -114,20 +112,20 @@ class RigidBody(object):
         given by :math:`I(t) = \sum_{i=1}^{N} (r_i^T r_i) \mathbf{1}_3 - r_i r_i^T`.
 
         Args:
-            vertices (torch.Tensor): Vertices of the rigid-body (shape: :math:`(N, 3)`)
-            masses (torch.Tensor): Mass of each particle (shape: :math:`(N)`)
+            vertices (jnp.ndarray): Vertices of the rigid-body (shape: :math:`(N, 3)`)
+            masses (jnp.ndarray): Mass of each particle (shape: :math:`(N)`)
 
         Returns:
-            (torch.Tensor): Inertia tensor, in the body frame (shape: :math:`(3, 3)`)
+            (jnp.ndarray): Inertia tensor, in the body frame (shape: :math:`(3, 3)`)
         """
         N = vertices.shape[0]  # Number of vertices
         # rt_r: (N, 1, 1)
-        rt_r = torch.matmul(vertices.view(-1, 1, 3), vertices.view(-1, 3, 1))
+        rt_r = jnp.matmul(vertices.reshape(-1, 1, 3), vertices.reshape(-1, 3, 1))
         # r_rt: (N, 3, 3)
-        r_rt = torch.matmul(vertices.view(-1, 3, 1), vertices.view(-1, 1, 3))
-        eye = torch.eye(3, dtype=vertices.dtype, device=vertices.device)
+        r_rt = jnp.matmul(vertices.reshape(-1, 3, 1), vertices.reshape(-1, 1, 3))
+        eye = jnp.eye(3, dtype=vertices.dtype)
         # Compute and return the (3, 3) inertia tensor.
-        return ((rt_r * eye.repeat(N, 1, 1) - r_rt) * masses.view(N, 1, 1)).sum(0)
+        return ((rt_r * jnp.tile(eye, (N, 1, 1)) - r_rt) * masses.reshape(N, 1, 1)).sum(0)
 
     @staticmethod
     def compute_inertia_world(inertia_body_inv, rotmat):
@@ -140,16 +138,16 @@ class RigidBody(object):
         is given by :math:`I_{world} = R I_{body}^{-1} R^T`.
 
         Args:
-            inertia_body_inv (torch.Tensor): Body-frame inertia tensor inversed
+            inertia_body_inv (jnp.ndarray): Body-frame inertia tensor inversed
                 (shape: :math:`(3, 3`).
-            rotmat (torch.Tensor): Rotation matrix that specifies the body-frame wrt
+            rotmat (jnp.ndarray): Rotation matrix that specifies the body-frame wrt
                 the world-frame (shape: :math:`(3, 3)`).
 
         Returns:
-            (torch.Tensor): World-frame inertia tensor (shape: :math:`(3, 3`).
+            (jnp.ndarray): World-frame inertia tensor (shape: :math:`(3, 3`).
         """
-        return torch.matmul(
-            torch.matmul(rotmat, inertia_body_inv), rotmat.transpose(0, 1)
+        return jnp.matmul(
+            jnp.matmul(rotmat, inertia_body_inv), rotmat.T
         )
 
     @staticmethod
@@ -160,14 +158,14 @@ class RigidBody(object):
         tensor and the angular momentum vector.
 
         Args:
-            inertia_world_inv (torch.Tensor): Inverse of the world-frame inertia
+            inertia_world_inv (jnp.ndarray): Inverse of the world-frame inertia
                 tensor (shape: :math:`(3, 3)`).
-            angular_momentum (torch.Tensor): Angular momentum (shape: :math:`(3)`).
+            angular_momentum (jnp.ndarray): Angular momentum (shape: :math:`(3)`).
 
         Returns:
-            (torch.Tensor): Angular velocity (shape: :math:`(3)`).
+            (jnp.ndarray): Angular velocity (shape: :math:`(3)`).
         """
-        return torch.matmul(inertia_world_inv, angular_momentum.view(-1, 1)).squeeze(-1)
+        return jnp.matmul(inertia_world_inv, angular_momentum.reshape(-1, 1)).squeeze(-1)
 
     @staticmethod
     def compute_linear_velocity_from_linear_momentum(
@@ -176,11 +174,11 @@ class RigidBody(object):
         r"""Computes linear velocity, given linear momentum.
 
         Args:
-            linear_momentum (torch.Tensor): Linear momentum (shape: :math:`(3)`).
-            mass (torch.Tensor): Total mass (shape: :math:`(1)`).
+            linear_momentum (jnp.ndarray): Linear momentum (shape: :math:`(3)`).
+            mass (jnp.ndarray): Total mass (shape: :math:`(1)`).
 
         Returns:
-            (torch.Tensor): Linear velocity (shape: :math:`(3)`).
+            (jnp.ndarray): Linear velocity (shape: :math:`(3)`).
         """
         return linear_momentum / mass
 
@@ -193,15 +191,15 @@ class RigidBody(object):
         is the position of particle :math:`i` in the world-frame.
 
         Args:
-            vertices (torch.Tensor): Vertices (positions of each particle) of the
+            vertices (jnp.ndarray): Vertices (positions of each particle) of the
                 rigid-body (shape: :math:`(N, 3)`).
-            masses (torch.Tensor): Mass of each particle (shape: :math:`(N)`).
+            masses (jnp.ndarray): Mass of each particle (shape: :math:`(N)`).
 
         Returns:
-            (torch.Tensor): Center of mass of the rigid-body (in the world-frame)
+            (jnp.ndarray): Center of mass of the rigid-body (in the world-frame)
                 (shape: :math:`(3)`).
         """
-        return (masses.view(-1, 1) * vertices).sum(0) / masses.sum()
+        return (masses.reshape(-1, 1) * vertices).sum(0) / masses.sum()
 
     def add_external_force(self, force, application_points=None):
         """Add an external force to the set of forces acting on the body.
@@ -220,29 +218,22 @@ class RigidBody(object):
 
     def apply_external_forces(self, time):
         """Apply the external forces (includes torques) at the current timestep. """
-        force_per_point = torch.zeros_like(self.vertices)
-        torque_per_point = torch.zeros_like(self.vertices)
+        force_per_point = jnp.zeros_like(self.vertices)
+        torque_per_point = jnp.zeros_like(self.vertices)
 
         for force, application_points in zip(self.forces, self.application_points):
             # Compute the force vector.
             force_vector = force.apply(time)
-            torque = torch.zeros(3, dtype=self.dtype, device=self.device)
             if application_points is not None:
-                mask = torch.zeros_like(self.vertices)
-                inds = (
-                    torch.tensor(
-                        application_points, dtype=torch.long, device=self.device
-                    )
-                    .view(-1, 1)
-                    .repeat(1, 3)
-                )
-                mask = mask.scatter_(0, inds, 1.0)
-                force_per_point = force_per_point + mask * force_vector.view(1, 3)
-                torque_per_point = torque_per_point + torch.linalg.cross(
-                    self.vertices - self.position.view(1, 3), force_per_point
+                mask = jnp.zeros_like(self.vertices)
+                inds = jnp.array(application_points, dtype=jnp.int32)
+                mask = mask.at[inds, :].set(1.0)
+                force_per_point = force_per_point + mask * force_vector.reshape(1, 3)
+                torque_per_point = torque_per_point + jnp.cross(
+                    self.vertices - self.position.reshape(1, 3), force_per_point
                 )
             else:
-                force_per_point = force_per_point + force_vector.view(1, 3)
+                force_per_point = force_per_point + force_vector.reshape(1, 3)
                 # Torque is 0 this case; axis of force passes through center of mass.
 
         return force_per_point.sum(0), torque_per_point.sum(0)
@@ -266,8 +257,9 @@ class RigidBody(object):
         # quaternion multiplication, where :math:`\omega(t)` is the angular velocity
         # converted to a quaternion (with `0` as the scalar component).
         # See Eq. (4-2) from above source.
-        angular_velocity_quat = torch.zeros(4, dtype=self.dtype, device=self.device)
-        angular_velocity_quat[1:] = self.angular_velocity
+        angular_velocity_quat = jnp.concatenate(
+            [jnp.zeros(1, dtype=self.dtype), self.angular_velocity]
+        )
         dorientation = 0.5 * multiply(angular_velocity_quat, self.orientation)
         # Derivative of linear momentum :math:`P(t)` is force :math:`F(t)`.
         # See Eq. (2-43) from above source.
@@ -288,19 +280,17 @@ class RigidBody(object):
         inertia_world_inv = self.compute_inertia_world(
             self.inertia_body_inv, quaternion_to_rotmat(self.orientation)
         )
-        self.angular_velocity = torch.matmul(
-            inertia_world_inv, self.angular_momentum.view(-1, 1)
-        ).view(-1)
+        self.angular_velocity = jnp.matmul(
+            inertia_world_inv, self.angular_momentum.reshape(-1, 1)
+        ).reshape(-1)
 
     def get_world_vertices(self):
         """Returns vertices transformed to world-frame. """
         rotmat = quaternion_to_rotmat(self.orientation)
-        return torch.matmul(rotmat, self.vertices.transpose(-1, -2)).transpose(
-            -1, -2
-        ) + self.position.view(1, 3)
+        return jnp.matmul(rotmat, self.vertices.T).T + self.position.reshape(1, 3)
 
 
-class SimplePendulum(torch.nn.Module):
+class SimplePendulum(object):
     r"""A simple pendulum object.
 
     The mathematical model for the pendulum object is given by the following
@@ -322,7 +312,7 @@ class SimplePendulum(torch.nn.Module):
     :math:`\dot{\theta}_2 = -\frac{b}{m} \theta_2 - \frac{g}{L} \sin{\theta_1}`
     :math:`\dot{\theta}_1 = \theta_2`
 
-    This can be solved by differentiable ODE routines (eg. `torchdifeq`), as opposed to
+    This can be solved by differentiable ODE routines, as opposed to
     explicit Euler integration.
     """
 
@@ -332,17 +322,16 @@ class SimplePendulum(torch.nn.Module):
         r"""Initialize a simple pendulum object, with the parameters specified.
 
         Args:
-            mass (float or torch.Tensor): Mass of the bob (kg) (assumed to be a point
+            mass (float or jnp.ndarray): Mass of the bob (kg) (assumed to be a point
                 mass, i.e., a spherical bob).
-            radius (float or torch.Tensor): Radius of the sphere (m) (currently only
+            radius (float or jnp.ndarray): Radius of the sphere (m) (currently only
                 used for rendering and shape estimation).
-            gravity (float or torch.Tensor): Acceleration due to gravity (m / s^2).
-            length (float or torch.Tensor): Length of the pendulum (m) (distance
+            gravity (float or jnp.ndarray): Acceleration due to gravity (m / s^2).
+            length (float or jnp.ndarray): Length of the pendulum (m) (distance
                 between the point of suspension and the center-of-mass of the bob).
-            damping (float or torch.Tensor): Damping coefficient (a dimensionless
+            damping (float or jnp.ndarray): Damping coefficient (a dimensionless
                 quantity).
         """
-        super(SimplePendulum, self).__init__()
         if mass is None:
             mass = 1.0
         if radius is None:
@@ -363,16 +352,15 @@ class SimplePendulum(torch.nn.Module):
         """Compute the simple pendulum ODE at the specified `time` values, given the
         initial conditions `theta`.
         """
-        dtheta = torch.zeros(2, dtype=theta.dtype, device=theta.device)
-        dtheta[0] = theta[1]
-        dtheta[1] = (
+        dtheta = jnp.array([
+            theta[1],
             -(self.damping / self.mass) * theta[1]
-            - (self.gravity / self.length) * theta[0].sin()
-        )
+            - (self.gravity / self.length) * jnp.sin(theta[0])
+        ])
         return dtheta
 
 
-class DoublePendulum(torch.nn.Module):
+class DoublePendulum(object):
     r"""A double pendulum object.
 
     As with the simple pendulum, we express the evolution of the double pendulum's
@@ -392,13 +380,12 @@ class DoublePendulum(torch.nn.Module):
         """Initialize the double pendulum.
 
         Args:
-            length1 (float or torch.Tensor): Length of the first rod/string (m).
-            length2 (float or torch.Tensor): Length of the second rod/string (m).
-            mass1 (float or torch.Tensor): Mass of the first bob (kg).
-            mass2 (float or torch.Tensor): Mass of the second bob (kg).
-            gravity (float or torch.Tensor): Acceleration due to gravity (m/s^2).
+            length1 (float or jnp.ndarray): Length of the first rod/string (m).
+            length2 (float or jnp.ndarray): Length of the second rod/string (m).
+            mass1 (float or jnp.ndarray): Mass of the first bob (kg).
+            mass2 (float or jnp.ndarray): Mass of the second bob (kg).
+            gravity (float or jnp.ndarray): Acceleration due to gravity (m/s^2).
         """
-        super(DoublePendulum, self).__init__()
         self.length1 = length1
         self.length2 = length2
         self.mass1 = mass1
@@ -409,27 +396,24 @@ class DoublePendulum(torch.nn.Module):
         """Computes time derivatives of the double pendulum ODE wrt state.
 
         NOTE: This module is intended for use with an ODE integrator, as opposed
-        for directly computing state evolution! For example, this can be used with
-        the `odeint` routine supplied by neural ode packages such as `torchdiffeq`.
+        for directly computing state evolution!
 
         Args:
-            time (torch.Tensor): Timesteps at which the ODE derivatives are to be
-                evaluated (usually a 1-D tensor).
-            y (torch.Tensor): State variables (state y = (theta1, z1, theta2, z2),
+            time (jnp.ndarray): Timesteps at which the ODE derivatives are to be
+                evaluated (usually a 1-D array).
+            y (jnp.ndarray): State variables (state y = (theta1, z1, theta2, z2),
                 where theta1 and theta2 are the angular displacements of the first
                 and the second bobs respectively, and z1 and z2 are the angular
                 velocities of the first and the second bobs.)
 
         Returns:
-            dydt (torch.Tensor): State derivatives.
+            dydt (jnp.ndarray): State derivatives.
         """
-        dydt = torch.zeros(4, dtype=y.dtype, device=y.device)
-
         theta1 = y[0]
         z1 = y[1]
         theta2 = y[2]
         z2 = y[3]
-        c, s = (theta1 - theta2).cos(), (theta1 - theta2).sin()
+        c, s = jnp.cos(theta1 - theta2), jnp.sin(theta1 - theta2)
         theta1dot = z1
         theta2dot = z2
         z1sq = z1 ** 2
@@ -437,21 +421,18 @@ class DoublePendulum(torch.nn.Module):
         denominator = self.mass1 + self.mass2 * s ** 2
 
         # Helper variables to compute the various terms in the ODE
-        term1 = self.mass2 * self.gravity * theta2.sin() * c
+        term1 = self.mass2 * self.gravity * jnp.sin(theta2) * c
         term2 = self.mass2 * s * (self.length1 * z1sq * c + self.length2 * z2sq)
-        term3 = (self.mass1 + self.mass2) * self.gravity * theta1.sin()
+        term3 = (self.mass1 + self.mass2) * self.gravity * jnp.sin(theta1)
         z1dot = (term1 - term2 - term3) / (self.length1 * denominator)
-        term4 = self.length1 * z1sq * s - self.gravity * theta2.sin()
-        term5 = self.gravity * theta1.sin() * c
+        term4 = self.length1 * z1sq * s - self.gravity * jnp.sin(theta2)
+        term5 = self.gravity * jnp.sin(theta1) * c
         term6 = self.mass2 * self.length2 * z2sq * s * c
         z2dot = ((self.mass1 + self.mass2) * (term4 + term5) + term6) / (
             self.length2 * denominator
         )
 
-        dydt[0] = theta1dot
-        dydt[1] = z1dot
-        dydt[2] = theta2dot
-        dydt[3] = z2dot
+        dydt = jnp.array([theta1dot, z1dot, theta2dot, z2dot])
 
         return dydt
 
@@ -459,7 +440,7 @@ class DoublePendulum(torch.nn.Module):
         """Return the total energy of the system.
 
         Args:
-            y (torch.Tensor): State at which to evaluate the total energy.
+            y (jnp.ndarray): State at which to evaluate the total energy.
                 State variables (state y = (theta1, z1, theta2, z2),
                 where theta1 and theta2 are the angular displacements of the first
                 and the second bobs respectively, and z1 and z2 are the angular
@@ -470,13 +451,13 @@ class DoublePendulum(torch.nn.Module):
         elif y.ndim == 1:
             t1, t1d, t2, t2d = y[0], y[1], y[2], y[3]
         else:
-            raise ValueError(f"Input tensor must have 1 or 2 dims. Got {y.ndim} dims.")
+            raise ValueError(f"Input array must have 1 or 2 dims. Got {y.ndim} dims.")
         m1, m2, l1, l2 = self.mass1, self.mass2, self.length1, self.length2
         g = self.gravity
-        V = -(m1 + m2) * l1 * g * t1.cos() - m2 * l2 * g * t2.cos()
+        V = -(m1 + m2) * l1 * g * jnp.cos(t1) - m2 * l2 * g * jnp.cos(t2)
         T = 0.5 * m1 * (l1 * t1d) ** 2 + 0.5 * m2 * (
             (l1 * t1d) ** 2
             + (l2 * t2d) ** 2
-            + 2 * l1 * l2 * t1d * t2d * (t1 - t2).cos()
+            + 2 * l1 * l2 * t1d * t2d * jnp.cos(t1 - t2)
         )
         return T + V
