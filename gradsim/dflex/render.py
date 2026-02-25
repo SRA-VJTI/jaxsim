@@ -27,8 +27,8 @@
 
 from pxr import Usd, UsdGeom, Gf
 
-import dflex.sim
-import dflex.util
+from . import sim
+from . import util
 
 import math
 
@@ -160,7 +160,7 @@ class UsdRenderer:
             geo_scale = model.shape_geo_scale[s].tolist()
             geo_src = model.shape_geo_src[s]
 
-            if (geo_type == dflex.sim.GEO_PLANE):
+            if (geo_type == sim.GEO_PLANE):
 
                 # plane mesh
                 size = 1000.0
@@ -178,27 +178,27 @@ class UsdRenderer:
                 mesh.GetFaceVertexCountsAttr().Set(counts)
                 mesh.GetFaceVertexIndicesAttr().Set(indices)
 
-            elif (geo_type == dflex.sim.GEO_SPHERE):
+            elif (geo_type == sim.GEO_SPHERE):
 
                 mesh = UsdGeom.Sphere.Define(stage, parent_path.AppendChild("sphere_" + str(s)))
                 mesh.GetRadiusAttr().Set(geo_scale[0])     #.item())
 
-            elif (geo_type == dflex.sim.GEO_CAPSULE):
+            elif (geo_type == sim.GEO_CAPSULE):
                 mesh = UsdGeom.Capsule.Define(stage, parent_path.AppendChild("capsule_" + str(s)))
                 mesh.GetRadiusAttr().Set(geo_scale[0])
                 mesh.GetHeightAttr().Set(geo_scale[1] * 2.0)
 
                 usd_add_xform(mesh)
-                usd_set_xform(mesh, (0.0, 0.0, 0.0), dflex.util.quat_from_axis_angle((0.0, 1.0, 0.0), math.pi * 0.5), (1.0, 1.0, 1.0), 0.0)
+                usd_set_xform(mesh, (0.0, 0.0, 0.0), util.quat_from_axis_angle((0.0, 1.0, 0.0), math.pi * 0.5), (1.0, 1.0, 1.0), 0.0)
 
-            elif (geo_type == dflex.sim.GEO_BOX):
+            elif (geo_type == sim.GEO_BOX):
                 mesh = UsdGeom.Cube.Define(stage, parent_path.AppendChild("box_" + str(s)))
                 #mesh.GetSizeAttr().Set((geo_scale[0], geo_scale[1], geo_scale[2]))
 
                 usd_add_xform(mesh)
-                usd_set_xform(mesh, (0.0, 0.0, 0.0), dflex.util.quat_identity(), (geo_scale[0], geo_scale[1], geo_scale[2]), 0.0)
+                usd_set_xform(mesh, (0.0, 0.0, 0.0), util.quat_identity(), (geo_scale[0], geo_scale[1], geo_scale[2]), 0.0)
 
-            elif (geo_type == dflex.sim.GEO_MESH):
+            elif (geo_type == sim.GEO_MESH):
 
                 mesh = UsdGeom.Mesh.Define(stage, parent_path.AppendChild("mesh_" + str(s)))
                 mesh.GetPointsAttr().Set(geo_src.vertices)
@@ -206,9 +206,9 @@ class UsdRenderer:
                 mesh.GetFaceVertexCountsAttr().Set([3] * int(len(geo_src.indices) / 3))
 
                 usd_add_xform(mesh)
-                usd_set_xform(mesh, (0.0, 0.0, 0.0), dflex.util.quat_identity(), (geo_scale[0], geo_scale[1], geo_scale[2]), 0.0)
+                usd_set_xform(mesh, (0.0, 0.0, 0.0), util.quat_identity(), (geo_scale[0], geo_scale[1], geo_scale[2]), 0.0)
 
-            elif (geo_type == dflex.sim.GEO_SDF):
+            elif (geo_type == sim.GEO_SDF):
                 pass
 
     def update(self, state, time):

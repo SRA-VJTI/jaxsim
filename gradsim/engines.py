@@ -1,7 +1,7 @@
 import math
 from abc import ABCMeta, abstractmethod
 
-import torch
+import jax.numpy as jnp
 
 from .contacts import detect_ground_plane_contacts
 from .utils.quaternion import normalize, quaternion_to_rotmat
@@ -38,9 +38,9 @@ class EulerIntegrator(ODEIntegrator):
             inertia_world_inv = body.compute_inertia_world(
                 body.inertia_body_inv, quaternion_to_rotmat(body.orientation)
             )
-            body.angular_velocity = torch.matmul(
-                inertia_world_inv, body.angular_momentum.view(-1, 1)
-            ).view(-1)
+            body.angular_velocity = jnp.matmul(
+                inertia_world_inv, body.angular_momentum.reshape(-1, 1)
+            ).reshape(-1)
             # Update the position in the end, as that's when linear velocity is
             # available.
             body.position = body.position + body.linear_velocity * dtime
@@ -59,9 +59,7 @@ class EulerIntegratorWithContacts(ODEIntegrator):
     def get_world_vertices(self, vertices, quaternion, position):
         """Returns vertices transformed to world-frame. """
         rotmat = quaternion_to_rotmat(quaternion)
-        return torch.matmul(rotmat, vertices.transpose(-1, -2)).transpose(
-            -1, -2
-        ) + position.view(1, 3)
+        return jnp.matmul(rotmat, vertices.T).T + position.reshape(1, 3)
 
     def compute_lookahead_state_update(self, starttime, endtime, body):
         if endtime < starttime:
@@ -77,9 +75,9 @@ class EulerIntegratorWithContacts(ODEIntegrator):
         inertia_world_inv = body.compute_inertia_world(
             body.inertia_body_inv, quaternion_to_rotmat(orientation)
         )
-        angular_velocity = torch.matmul(
-            inertia_world_inv, angular_momentum.view(-1, 1)
-        ).view(-1)
+        angular_velocity = jnp.matmul(
+            inertia_world_inv, angular_momentum.reshape(-1, 1)
+        ).reshape(-1)
         # Update the position in the end, as that's when linear velocity is
         # available (important for semi-implicit Euler integration).
         position = body.position + linear_velocity * dtime_
@@ -162,9 +160,9 @@ class EulerIntegratorWithContacts(ODEIntegrator):
             inertia_world_inv = body.compute_inertia_world(
                 body.inertia_body_inv, quaternion_to_rotmat(body.orientation)
             )
-            body.angular_velocity = torch.matmul(
-                inertia_world_inv, body.angular_momentum.view(-1, 1)
-            ).view(-1)
+            body.angular_velocity = jnp.matmul(
+                inertia_world_inv, body.angular_momentum.reshape(-1, 1)
+            ).reshape(-1)
             # Update the position in the end, as that's when linear velocity is
             # available.
             body.position = body.position + body.linear_velocity * dtime
@@ -201,8 +199,8 @@ class EulerIntegratorWithContacts(ODEIntegrator):
                 for idx, val in enumerate(contact_inds):
                     r = contact_points[idx] - body.position
                     n = contact_normals[idx]
-                    vrel = body.linear_velocity + torch.linalg.cross(body.angular_velocity, r)
-                    vrel = torch.dot(n, vrel)
+                    vrel = body.linear_velocity + jnp.cross(body.angular_velocity, r)
+                    vrel = jnp.dot(n, vrel)
 
                     THRESHOLD = 0.001
                     if vrel > THRESHOLD:
@@ -215,19 +213,19 @@ class EulerIntegratorWithContacts(ODEIntegrator):
                     iinv = body.compute_inertia_world(
                         body.inertia_body_inv, quaternion_to_rotmat(body.orientation)
                     )
-                    term0 = torch.linalg.cross(r, n)
-                    term1 = torch.matmul(iinv, term0.unsqueeze(-1)).squeeze(-1)
-                    term2 = torch.linalg.cross(term1, r)
-                    term3 = torch.dot(n, term2)
+                    term0 = jnp.cross(r, n)
+                    term1 = jnp.matmul(iinv, term0.reshape(-1, 1)).squeeze(-1)
+                    term2 = jnp.cross(term1, r)
+                    term3 = jnp.dot(n, term2)
                     den = minv + term3
                     j = (num / den) * n
 
                     body.linear_momentum = body.linear_momentum + j
-                    body.angular_momentum = body.angular_momentum + torch.linalg.cross(r, j)
+                    body.angular_momentum = body.angular_momentum + jnp.cross(r, j)
                     body.linear_velocity = body.linear_momentum / body.masses.sum()
-                    body.angular_velocity = torch.matmul(
-                        inertia_world_inv, body.angular_momentum.view(-1, 1)
-                    ).view(-1)
+                    body.angular_velocity = jnp.matmul(
+                        inertia_world_inv, body.angular_momentum.reshape(-1, 1)
+                    ).reshape(-1)
 
                 return dtime
 
@@ -236,100 +234,73 @@ class EulerIntegratorWithContacts(ODEIntegrator):
                 """
 
                 # # positions relative to center-of-mass
-                # r = contact_points.view(-1, 3) - body.position.view(-1, 3)
-                # contact_velocities = body.linear_velocity.view(-1, 3) + torch.linalg.cross(
-                #     body.angular_velocity.view(-1, 3).repeat(r.shape[0], 1), r
+                # r = contact_points.reshape(-1, 3) - body.position.reshape(-1, 3)
+                # contact_velocities = body.linear_velocity.reshape(-1, 3) + jnp.cross(
+                #     jnp.tile(body.angular_velocity.reshape(-1, 3), (r.shape[0], 1)), r
                 # )
-                # # Apply dot_product(ground plane normal, contact_velocities).
-                # # (Since it's a batch dot operation, implement using matmul).
-                # # (N x 1 x 3) x (N x 3 x 1) -> (N x 1 x 1)
-                # # Squeeze twice => (N x 1 x 1) -> (N,)
-                # # print(contact_normals.shape, contact_velocities.shape)
-                # contact_velocities = torch.matmul(
-                #     contact_normals.unsqueeze(-2), contact_velocities.unsqueeze(-1)
+                # contact_velocities = jnp.matmul(
+                #     contact_normals[:, None, :], contact_velocities[:, :, None]
                 # ).squeeze(-1).squeeze(-1)
-                # # print(contact_velocities.shape)
 
                 # numerator = -(1 + 1) * contact_velocities
                 # inv_mass = (1 / body.masses.sum())
                 # inertia_world_inv = body.compute_inertia_world(
                 #     body.inertia_body_inv, quaternion_to_rotmat(body.orientation)
                 # )
-                # # print("###")
-                # # print(inertia_world_inv.shape)
-                # # print(torch.linalg.cross(torch.linalg.cross(r, contact_normals), r).shape)
-                # # print("###")
-                # term0 = torch.linalg.cross(r, contact_normals)
-                # term1 = torch.matmul(
-                #     inertia_world_inv.unsqueeze(0),
-                #     term0.unsqueeze(-1),
+                # term0 = jnp.cross(r, contact_normals)
+                # term1 = jnp.matmul(
+                #     inertia_world_inv[None, :, :],
+                #     term0[:, :, None],
                 # ).squeeze(-1)
-                # # print(term0.shape, term1.shape)
-                # term2 = torch.linalg.cross(term1, r)
-                # # print(term2.shape)
-                # term3 = torch.matmul(
-                #     contact_normals.unsqueeze(-2), term2.unsqueeze(-1)
+                # term2 = jnp.cross(term1, r)
+                # term3 = jnp.matmul(
+                #     contact_normals[:, None, :], term2[:, :, None]
                 # ).squeeze(-1).squeeze(-1)
-                # # print(term3.shape)
                 # denominator = inv_mass + term3
 
-                # impulses = (numerator / (denominator)).unsqueeze(-1) * contact_normals
-                # print("jn:", impulses.shape)
+                # impulses = (numerator / (denominator))[:, None] * contact_normals
 
-                # # for i in range(impulses.shape[0]):
-                # #     body.linear_momentum = body.linear_momentum + impulses[i]
-                # #     body.angular_momentum = body.angular_momentum + torch.linalg.cross(r[i], impulses[i])
-                # #     body.linear_velocity = body.linear_momentum / body.masses.sum()
-                # #     body.angular_velocity = torch.matmul(
-                # #         inertia_world_inv, body.angular_momentum.view(-1, 1)
-                # #     ).view(-1)
-
-                # # linear_momentum += impulse_forces
                 # body.linear_momentum = body.linear_momentum + impulses.sum(0)
-                # # angular_momentum += sum(cross(r[i], impulse_force[i]))
-                # body.angular_momentum = body.angular_momentum + torch.linalg.cross(r, impulses).sum(0)
-                # # linear_velocity = linear_momentum / mass
+                # body.angular_momentum = body.angular_momentum + jnp.cross(r, impulses).sum(0)
                 # body.linear_velocity = body.linear_momentum / body.masses.sum()
-                # # angular_velocity = inertia_world_inv * angular_momentum
-                # body.angular_velocity = torch.matmul(
-                #     inertia_world_inv, body.angular_momentum.view(-1, 1)
-                # ).view(-1)
+                # body.angular_velocity = jnp.matmul(
+                #     inertia_world_inv, body.angular_momentum.reshape(-1, 1)
+                # ).reshape(-1)
 
                 """
                 Another attempt at batch-model collision resolution (didn't work!)
                 """
 
-                # r = contact_points.view(-1, 3) - body.position.view(-1, 3)
-                # n = contact_normals.view(-1, 3)
-                # vrel = body.linear_velocity.view(-1, 3) + torch.linalg.cross(
-                #     body.angular_velocity.view(-1, 3).repeat(r.shape[0], 1), r
+                # r = contact_points.reshape(-1, 3) - body.position.reshape(-1, 3)
+                # n = contact_normals.reshape(-1, 3)
+                # vrel = body.linear_velocity.reshape(-1, 3) + jnp.cross(
+                #     jnp.tile(body.angular_velocity.reshape(-1, 3), (r.shape[0], 1)), r
                 # )
-                # vrel = torch.matmul(
-                #     n.unsqueeze(-2), vrel.unsqueeze(-1)
+                # vrel = jnp.matmul(
+                #     n[:, None, :], vrel[:, :, None]
                 # ).squeeze(-1)
                 # num = -(1 + body.restitution) * vrel
                 # minv = 1 / body.masses.sum()
                 # iinv = body.compute_inertia_world(
                 #     body.inertia_body_inv, quaternion_to_rotmat(body.orientation)
                 # )
-                # term0 = torch.linalg.cross(r, n)
-                # term1 = torch.matmul(
-                #     iinv.unsqueeze(0).repeat(r.shape[0], 1, 1), term0.unsqueeze(-1)
+                # term0 = jnp.cross(r, n)
+                # term1 = jnp.matmul(
+                #     jnp.tile(iinv[None, :, :], (r.shape[0], 1, 1)), term0[:, :, None]
                 # ).squeeze(-1)
-                # term2 = torch.linalg.cross(term1, r)
-                # term3 = torch.matmul(
-                #     n.unsqueeze(-2), term2.unsqueeze(-1)
+                # term2 = jnp.cross(term1, r)
+                # term3 = jnp.matmul(
+                #     n[:, None, :], term2[:, :, None]
                 # ).squeeze(-1)
                 # den = minv + term3
                 # j = (num / den) * n
-                # print(j.shape)
 
                 # body.linear_momentum = body.linear_momentum + j.sum(0)
-                # body.angular_momentum = body.angular_momentum + torch.linalg.cross(r, j).sum(0)
+                # body.angular_momentum = body.angular_momentum + jnp.cross(r, j).sum(0)
                 # body.linear_velocity = body.linear_momentum / body.masses.sum()
-                # body.angular_velocity = torch.matmul(
-                #     inertia_world_inv, body.angular_momentum.view(-1, 1)
-                # ).view(-1)
+                # body.angular_velocity = jnp.matmul(
+                #     inertia_world_inv, body.angular_momentum.reshape(-1, 1)
+                # ).reshape(-1)
 
                 # return dtime
 
@@ -352,9 +323,7 @@ class SemiImplicitEulerWithContacts(ODEIntegrator):
     def get_world_vertices(self, vertices, quaternion, position):
         """Returns vertices transformed to world-frame. """
         rotmat = quaternion_to_rotmat(quaternion)
-        return torch.matmul(rotmat, vertices.transpose(-1, -2)).transpose(
-            -1, -2
-        ) + position.view(1, 3)
+        return jnp.matmul(rotmat, vertices.T).T + position.reshape(1, 3)
 
     def compute_lookahead_state_update(self, starttime, endtime, body):
         if endtime < starttime:
@@ -370,9 +339,9 @@ class SemiImplicitEulerWithContacts(ODEIntegrator):
         inertia_world_inv = body.compute_inertia_world(
             body.inertia_body_inv, quaternion_to_rotmat(orientation)
         )
-        angular_velocity = torch.matmul(
-            inertia_world_inv, angular_momentum.view(-1, 1)
-        ).view(-1)
+        angular_velocity = jnp.matmul(
+            inertia_world_inv, angular_momentum.reshape(-1, 1)
+        ).reshape(-1)
         # Update the position in the end, as that's when linear velocity is
         # available (important for semi-implicit Euler integration).
         position = body.position + linear_velocity * dtime_
@@ -413,9 +382,9 @@ class SemiImplicitEulerWithContacts(ODEIntegrator):
             inertia_world_inv = body.compute_inertia_world(
                 body.inertia_body_inv, quaternion_to_rotmat(body.orientation)
             )
-            body.angular_velocity = torch.matmul(
-                inertia_world_inv, body.angular_momentum.view(-1, 1)
-            ).view(-1)
+            body.angular_velocity = jnp.matmul(
+                inertia_world_inv, body.angular_momentum.reshape(-1, 1)
+            ).reshape(-1)
             # Update the position in the end, as that's when linear velocity is
             # available.
             body.position = body.position + body.linear_velocity * dtime
@@ -451,8 +420,8 @@ class SemiImplicitEulerWithContacts(ODEIntegrator):
                 for idx, val in enumerate(contact_inds):
                     r = contact_points[idx] - body.position
                     n = contact_normals[idx]
-                    vrel = body.linear_velocity + torch.linalg.cross(body.angular_velocity, r)
-                    vrel = torch.dot(n, vrel)
+                    vrel = body.linear_velocity + jnp.cross(body.angular_velocity, r)
+                    vrel = jnp.dot(n, vrel)
 
                     if vrel > simulator.relative_velocity_threshold:
                         continue
@@ -467,18 +436,18 @@ class SemiImplicitEulerWithContacts(ODEIntegrator):
                     iinv = body.compute_inertia_world(
                         body.inertia_body_inv, quaternion_to_rotmat(body.orientation)
                     )
-                    term0 = torch.linalg.cross(r, n)
-                    term1 = torch.matmul(iinv, term0.unsqueeze(-1)).squeeze(-1)
-                    term2 = torch.linalg.cross(term1, r)
-                    term3 = torch.dot(n, term2)
+                    term0 = jnp.cross(r, n)
+                    term1 = jnp.matmul(iinv, term0.reshape(-1, 1)).squeeze(-1)
+                    term2 = jnp.cross(term1, r)
+                    term3 = jnp.dot(n, term2)
                     den = minv + term3
                     j = (num / den) * n
 
                     body.linear_momentum = body.linear_momentum + j
-                    body.angular_momentum = body.angular_momentum + torch.linalg.cross(r, j)
+                    body.angular_momentum = body.angular_momentum + jnp.cross(r, j)
                     body.linear_velocity = body.linear_momentum / body.masses.sum()
-                    body.angular_velocity = torch.matmul(
-                        inertia_world_inv, body.angular_momentum.view(-1, 1)
-                    ).view(-1)
+                    body.angular_velocity = jnp.matmul(
+                        inertia_world_inv, body.angular_momentum.reshape(-1, 1)
+                    ).reshape(-1)
 
         return dtime

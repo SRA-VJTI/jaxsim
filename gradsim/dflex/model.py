@@ -26,7 +26,7 @@
 # Copyright (c) 2020-2021 NVIDIA Corporation. All rights reserved.
 
 import math
-import torch
+import jax.numpy as jnp
 import numpy as np
 
 from .util import *
@@ -221,36 +221,36 @@ class ArticulationBuilder:
         # one joint per-link
         a.link_count = self.link_count
 
-        a.joint_type = torch.tensor(self.joint_type, dtype=torch.int32, device=adapter)
-        a.joint_parent = torch.tensor(self.joint_parent, dtype=torch.int32, device=adapter)
-        a.joint_X_pj = torch.tensor(transform_flatten_list(self.joint_X_pj), dtype=torch.float32, device=adapter)
-        a.joint_X_cm = torch.tensor(transform_flatten_list(self.joint_X_cm), dtype=torch.float32, device=adapter)
-        a.joint_axis = torch.tensor(self.joint_axis, dtype=torch.float32, device=adapter)
-        a.joint_S_s = torch.tensor(self.joint_S_s, dtype=torch.float32, device=adapter)
+        a.joint_type = jnp.array(self.joint_type, dtype=jnp.int32)
+        a.joint_parent = jnp.array(self.joint_parent, dtype=jnp.int32)
+        a.joint_X_pj = jnp.array(transform_flatten_list(self.joint_X_pj), dtype=jnp.float32)
+        a.joint_X_cm = jnp.array(transform_flatten_list(self.joint_X_cm), dtype=jnp.float32)
+        a.joint_axis = jnp.array(self.joint_axis, dtype=jnp.float32)
+        a.joint_S_s = jnp.array(self.joint_S_s, dtype=jnp.float32)
 
-        a.joint_q_start = torch.tensor(self.joint_q_start, dtype=torch.int32, device=adapter)
-        a.joint_qd_start = torch.tensor(self.joint_qd_start, dtype=torch.int32, device=adapter)
+        a.joint_q_start = jnp.array(self.joint_q_start, dtype=jnp.int32)
+        a.joint_qd_start = jnp.array(self.joint_qd_start, dtype=jnp.int32)
 
-        a.joint_q = torch.tensor(self.joint_q, dtype=torch.float32, device=adapter, requires_grad=True)
-        a.joint_qd = torch.tensor(self.joint_qd, dtype=torch.float32, device=adapter, requires_grad=True)
-        a.joint_qdd = torch.tensor(self.joint_qdd, dtype=torch.float32, device=adapter, requires_grad=True)
-        a.joint_tau = torch.tensor(self.joint_tau, dtype=torch.float32, device=adapter, requires_grad=True)
-        a.joint_u = torch.tensor(self.joint_u, dtype=torch.float32, device=adapter, requires_grad=True)
+        a.joint_q = jnp.array(self.joint_q, dtype=jnp.float32)
+        a.joint_qd = jnp.array(self.joint_qd, dtype=jnp.float32)
+        a.joint_qdd = jnp.array(self.joint_qdd, dtype=jnp.float32)
+        a.joint_tau = jnp.array(self.joint_tau, dtype=jnp.float32)
+        a.joint_u = jnp.array(self.joint_u, dtype=jnp.float32)
 
-        a.body_X_sc = torch.tensor(transform_flatten_list(self.body_X_sc), dtype=torch.float32, device=adapter)
-        a.body_X_sm = torch.tensor(transform_flatten_list(self.body_X_sm), dtype=torch.float32, device=adapter)
+        a.body_X_sc = jnp.array(transform_flatten_list(self.body_X_sc), dtype=jnp.float32)
+        a.body_X_sm = jnp.array(transform_flatten_list(self.body_X_sm), dtype=jnp.float32)
 
-        a.body_v_s = torch.tensor(self.body_v_s, dtype=torch.float32, device=adapter)
-        a.body_a_s = torch.tensor(self.body_a_s, dtype=torch.float32, device=adapter)
-        a.body_f_s = torch.tensor(self.body_f_s, dtype=torch.float32, device=adapter)
-        a.body_f_ext_s = torch.tensor(self.body_f_ext_s, dtype=torch.float32, device=adapter)
+        a.body_v_s = jnp.array(self.body_v_s, dtype=jnp.float32)
+        a.body_a_s = jnp.array(self.body_a_s, dtype=jnp.float32)
+        a.body_f_s = jnp.array(self.body_f_s, dtype=jnp.float32)
+        a.body_f_ext_s = jnp.array(self.body_f_ext_s, dtype=jnp.float32)
 
-        a.body_I_m = torch.tensor(self.body_I_m, dtype=torch.float32, device=adapter)
-        a.body_I_s = torch.tensor(self.body_I_s, dtype=torch.float32, device=adapter)
+        a.body_I_m = jnp.array(self.body_I_m, dtype=jnp.float32)
+        a.body_I_s = jnp.array(self.body_I_s, dtype=jnp.float32)
 
         # placeholder offset tensors for the articulation (could be in a larger flattened array of articulations)
-        a.articulation_start = torch.tensor((0), dtype=torch.int32, device=adapter)
-        a.articulation_end = torch.tensor((self.link_count), dtype=torch.int32, device=adapter)
+        a.articulation_start = jnp.array(0, dtype=jnp.int32)
+        a.articulation_end = jnp.array(self.link_count, dtype=jnp.int32)
 
         return a
 
@@ -684,7 +684,7 @@ class Model:
 
         self.spring_count = 0
 
-        self.gravity = torch.tensor((0.0, -9.8, 0.0), dtype=torch.float32, device=adapter)
+        self.gravity = jnp.array((0.0, -9.8, 0.0), dtype=jnp.float32)
 
         self.contact_distance = 0.1
         self.contact_ke = 1.e+3
@@ -709,14 +709,14 @@ class Model:
     def state(self):
 
         s = State()
-        s.q = torch.clone(self.particle_x)
-        s.u = torch.clone(self.particle_v)
+        s.q = jnp.array(self.particle_x)
+        s.u = jnp.array(self.particle_v)
 
-        s.rigid_x = torch.clone(self.rigid_x)
-        s.rigid_r = torch.clone(self.rigid_r)
+        s.rigid_x = jnp.array(self.rigid_x)
+        s.rigid_r = jnp.array(self.rigid_r)
 
-        s.rigid_v = torch.clone(self.rigid_v)
-        s.rigid_w = torch.clone(self.rigid_w)
+        s.rigid_v = jnp.array(self.rigid_v)
+        s.rigid_w = jnp.array(self.rigid_w)
 
         return s
 
@@ -726,7 +726,7 @@ class Model:
 
         # build a list of all tensor attributes
         for attr, value in self.__dict__.items():
-            if (torch.is_tensor(value)):
+            if isinstance(value, jnp.ndarray):
                 tensors.append(value)
 
         return tensors
@@ -776,12 +776,12 @@ class Model:
 
                     add_contact(self.shape_body[i], -1, p, 0.0, i)
 
-        # send to torch
-        self.contact_body0 = torch.tensor(body0, device=self.adapter)
-        self.contact_body1 = torch.tensor(body1, device=self.adapter)
-        self.contact_point0 = torch.tensor(point, device=self.adapter)
-        self.contact_dist = torch.tensor(dist, device=self.adapter)
-        self.contact_material = torch.tensor(mat, device=self.adapter)
+        # pack into arrays
+        self.contact_body0 = jnp.array(body0)
+        self.contact_body1 = jnp.array(body1)
+        self.contact_point0 = jnp.array(point)
+        self.contact_dist = jnp.array(dist)
+        self.contact_material = jnp.array(mat)
 
         self.contact_count = len(body0)
 
@@ -793,14 +793,14 @@ class State:
     def clone(self):
 
         copy = State()
-        copy.q = torch.empty_like(self.q)
-        copy.u = torch.empty_like(self.u)
+        copy.q = jnp.zeros_like(self.q)
+        copy.u = jnp.zeros_like(self.u)
 
-        copy.rigid_x = torch.empty_like(self.rigid_x)
-        copy.rigid_r = torch.empty_like(self.rigid_r)
+        copy.rigid_x = jnp.zeros_like(self.rigid_x)
+        copy.rigid_r = jnp.zeros_like(self.rigid_r)
 
-        copy.rigid_v = torch.empty_like(self.rigid_v)
-        copy.rigid_w = torch.empty_like(self.rigid_w)
+        copy.rigid_v = jnp.zeros_like(self.rigid_v)
+        copy.rigid_w = jnp.zeros_like(self.rigid_w)
 
         return copy
 
@@ -1453,47 +1453,47 @@ class ModelBuilder:
 
         m = Model(adapter)
 
-        m.particle_x = torch.tensor(self.particle_x, dtype=torch.float32, device=adapter)
-        m.particle_v = torch.tensor(self.particle_v, dtype=torch.float32, device=adapter)
-        m.particle_mass = torch.tensor(self.particle_mass, dtype=torch.float32, device=adapter)
-        m.particle_inv_mass = torch.tensor(particle_inv_mass, dtype=torch.float32, device=adapter)
+        m.particle_x = jnp.array(self.particle_x, dtype=jnp.float32)
+        m.particle_v = jnp.array(self.particle_v, dtype=jnp.float32)
+        m.particle_mass = jnp.array(self.particle_mass, dtype=jnp.float32)
+        m.particle_inv_mass = jnp.array(particle_inv_mass, dtype=jnp.float32)
 
-        m.rigid_com = torch.tensor(self.rigid_com, dtype=torch.float32, device=adapter)
-        m.rigid_mass = torch.tensor(self.rigid_mass, dtype=torch.float32, device=adapter)
-        m.rigid_inertia = torch.tensor(self.rigid_inertia, dtype=torch.float32, device=adapter)
-        m.rigid_inv_mass = torch.tensor(rigid_inv_mass, dtype=torch.float32, device=adapter)
-        m.rigid_inv_inertia = torch.tensor(rigid_inv_inertia, dtype=torch.float32, device=adapter)
+        m.rigid_com = jnp.array(self.rigid_com, dtype=jnp.float32)
+        m.rigid_mass = jnp.array(self.rigid_mass, dtype=jnp.float32)
+        m.rigid_inertia = jnp.array(self.rigid_inertia, dtype=jnp.float32)
+        m.rigid_inv_mass = jnp.array(rigid_inv_mass, dtype=jnp.float32)
+        m.rigid_inv_inertia = jnp.array(rigid_inv_inertia, dtype=jnp.float32)
 
-        m.rigid_x = torch.tensor(self.rigid_x, dtype=torch.float32, device=adapter)
-        m.rigid_r = torch.tensor(self.rigid_r, dtype=torch.float32, device=adapter)
-        m.rigid_v = torch.tensor(self.rigid_v, dtype=torch.float32, device=adapter)
-        m.rigid_w = torch.tensor(self.rigid_w, dtype=torch.float32, device=adapter)
+        m.rigid_x = jnp.array(self.rigid_x, dtype=jnp.float32)
+        m.rigid_r = jnp.array(self.rigid_r, dtype=jnp.float32)
+        m.rigid_v = jnp.array(self.rigid_v, dtype=jnp.float32)
+        m.rigid_w = jnp.array(self.rigid_w, dtype=jnp.float32)
 
-        m.shape_position = torch.tensor(self.shape_x, dtype=torch.float32, device=adapter)
-        m.shape_rotation = torch.tensor(self.shape_r, dtype=torch.float32, device=adapter)
-        m.shape_body = torch.tensor(self.shape_body, dtype=torch.int32, device=adapter)
-        m.shape_geo_type = torch.tensor(self.shape_geo_type, dtype=torch.int32, device=adapter)
-        m.shape_geo_src = self.shape_geo_src     # torch.tensor(self.shape_geo_type, dtype=torch.int32, device=adapter)
-        m.shape_geo_scale = torch.tensor(self.shape_geo_scale, dtype=torch.float32, device=adapter)
-        m.shape_materials = torch.tensor(self.shape_materials, dtype=torch.float32, device=adapter)
+        m.shape_position = jnp.array(self.shape_x, dtype=jnp.float32)
+        m.shape_rotation = jnp.array(self.shape_r, dtype=jnp.float32)
+        m.shape_body = jnp.array(self.shape_body, dtype=jnp.int32)
+        m.shape_geo_type = jnp.array(self.shape_geo_type, dtype=jnp.int32)
+        m.shape_geo_src = self.shape_geo_src
+        m.shape_geo_scale = jnp.array(self.shape_geo_scale, dtype=jnp.float32)
+        m.shape_materials = jnp.array(self.shape_materials, dtype=jnp.float32)
 
-        m.spring_indices = torch.tensor(self.spring_indices, dtype=torch.int32, device=adapter)
-        m.spring_rest_length = torch.tensor(self.spring_rest_length, dtype=torch.float32, device=adapter)
-        m.spring_stiffness = torch.tensor(self.spring_stiffness, dtype=torch.float32, device=adapter)
-        m.spring_damping = torch.tensor(self.spring_damping, dtype=torch.float32, device=adapter)
-        m.spring_control = torch.tensor(self.spring_control, dtype=torch.float32, device=adapter)
+        m.spring_indices = jnp.array(self.spring_indices, dtype=jnp.int32)
+        m.spring_rest_length = jnp.array(self.spring_rest_length, dtype=jnp.float32)
+        m.spring_stiffness = jnp.array(self.spring_stiffness, dtype=jnp.float32)
+        m.spring_damping = jnp.array(self.spring_damping, dtype=jnp.float32)
+        m.spring_control = jnp.array(self.spring_control, dtype=jnp.float32)
 
-        m.tri_indices = torch.tensor(self.tri_indices, dtype=torch.int32, device=adapter)
-        m.tri_poses = torch.tensor(self.tri_poses, dtype=torch.float32, device=adapter)
-        m.tri_activations = torch.tensor(self.tri_activations, dtype=torch.float32, device=adapter)
+        m.tri_indices = jnp.array(self.tri_indices, dtype=jnp.int32)
+        m.tri_poses = jnp.array(self.tri_poses, dtype=jnp.float32)
+        m.tri_activations = jnp.array(self.tri_activations, dtype=jnp.float32)
 
-        m.edge_indices = torch.tensor(self.edge_indices, dtype=torch.int32, device=adapter)
-        m.edge_rest_angle = torch.tensor(self.edge_rest_angle, dtype=torch.float32, device=adapter)
+        m.edge_indices = jnp.array(self.edge_indices, dtype=jnp.int32)
+        m.edge_rest_angle = jnp.array(self.edge_rest_angle, dtype=jnp.float32)
 
-        m.tet_indices = torch.tensor(self.tet_indices, dtype=torch.int32, device=adapter)
-        m.tet_poses = torch.tensor(self.tet_poses, dtype=torch.float32, device=adapter)
-        m.tet_activations = torch.tensor(self.tet_activations, dtype=torch.float32, device=adapter)
-        m.tet_materials = torch.tensor(self.tet_materials, dtype=torch.float32, device=adapter)
+        m.tet_indices = jnp.array(self.tet_indices, dtype=jnp.int32)
+        m.tet_poses = jnp.array(self.tet_poses, dtype=jnp.float32)
+        m.tet_activations = jnp.array(self.tet_activations, dtype=jnp.float32)
+        m.tet_materials = jnp.array(self.tet_materials, dtype=jnp.float32)
 
         # set up offsets
         m.particle_count = len(self.particle_x)
@@ -1516,7 +1516,7 @@ class ModelBuilder:
 
         # enable ground plane
         m.ground = True
-        m.gravity = torch.tensor((0.0, -9.8, 0.0), dtype=torch.float32, device=adapter)
+        m.gravity = jnp.array((0.0, -9.8, 0.0), dtype=jnp.float32)
 
         # from dflex.config import use_taichi
         # if use_taichi:
