@@ -12,309 +12,175 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch
-import torch.nn.functional as F
+import jax.numpy as jnp
+
+
+def _is_array(x):
+    return hasattr(x, "shape")
 
 
 def compute_ambient_light(
-    face_vertices: torch.Tensor,
-    textures: torch.Tensor,
+    face_vertices,
+    textures,
     ambient_intensity: float = 1.0,
-    ambient_color: torch.Tensor = None,
+    ambient_color=None,
 ):
-    r"""Computes ambient lighting to a mesh, given faces and face textures.
+    r"""Computes ambient lighting for a mesh.
 
     Args:
-        face_vertices (torch.Tensor): A tensor containing a list of (per-face)
-            vertices of the mesh (shape: `B` :math:`\times` `num_faces`
-            :math:`\times 9`). Here, :math:`B` is the batchsize, `num_faces`
-            is the number of faces in the mesh, and since each face is assumed
-            to be a triangle, it has 3 vertices, and hence 9 coordinates in
-            total.
-        textures (torch.Tensor): TODO: Add docstring
-        ambient_intensity (float): Intensity of ambient light (in the range
-            :math:`\left[0, 1\right]`). If the values provided are outside
-            this range, we clip them so that they fall in range.
-        ambient_color (torch.Tensor): Color of the ambient light (R, G, B)
-            (shape: :math:`3`)
+        face_vertices: (B, F, 3, 3) or (B, F, 9) per-face vertices.
+        textures: face textures array.
+        ambient_intensity: scalar in [0, 1].
+        ambient_color: (3,) RGB, defaults to ones.
 
     Returns:
-        light (torch.Tensor): A light tensor, which can be elementwise
-            multiplied with the textures, to obtain the mesh with lighting
-            applied (shape: `B` :math:`\times` `num_faces` :math:`\times
-            1 \times 1 \times 1 \times 3`)
-
+        light: (B, F, 1, 3) light tensor to elementwise-multiply with textures.
     """
-
-    if not torch.is_tensor(face_vertices):
+    if not _is_array(face_vertices):
         raise TypeError(
-            "Expected input face_vertices to be of type "
-            "torch.Tensor. Got {0} instead.".format(type(face_vertices))
+            "Expected face_vertices to be an array. Got {0}.".format(type(face_vertices))
         )
-    if not torch.is_tensor(textures):
+    if not _is_array(textures):
         raise TypeError(
-            "Expected input textures to be of type "
-            "torch.Tensor. Got {0} instead.".format(type(textures))
+            "Expected textures to be an array. Got {0}.".format(type(textures))
         )
-    if not isinstance(ambient_intensity, float) and not isinstance(
-        ambient_intensity, int
-    ):
+    if not isinstance(ambient_intensity, (float, int)):
         raise TypeError(
-            "Expected input ambient_intensity to be of "
-            "type float. Got {0} instead.".format(type(ambient_intensity))
+            "Expected ambient_intensity to be float. Got {0}.".format(type(ambient_intensity))
         )
     if ambient_color is None:
-        ambient_color = torch.ones(
-            3, dtype=face_vertices.dtype, device=face_vertices.device
-        )
-    if not torch.is_tensor(ambient_color):
+        ambient_color = jnp.ones(3, dtype=face_vertices.dtype)
+    if not _is_array(ambient_color):
         raise TypeError(
-            "Expected input ambient_color to be of type "
-            "torch.Tensor. Got {0} instead.".format(type(ambient_color))
+            "Expected ambient_color to be an array. Got {0}.".format(type(ambient_color))
         )
-
-    # if face_vertices.dim() != 3 or face_vertices.shape[-1] != 9:
-    #     raise ValueError('Input face_vertices must have 3 dimensions '
-    #                      'and be of shape (..., ..., 9). Got {0} dimensions '
-    #                      'and shape {1} instead.'.format(face_vertices.dim(),
-    #                                                      face_vertices.shape))
-    # TODO: check texture dims
-    if ambient_color.dim() != 1 or ambient_color.shape != (3,):
+    if ambient_color.ndim != 1 or ambient_color.shape != (3,):
         raise ValueError(
-            "Input ambient_color must have 1 dimension "
-            "and be of shape 3. Got {0} dimensions and shape {1} "
-            "instead.".format(ambient_color.dim(), ambient_color.shape)
+            "ambient_color must be shape (3,). Got {0}.".format(ambient_color.shape)
         )
 
-    # Clip ambient_intensity to be in the range [0, 1]
-    if ambient_intensity < 0:
-        ambient_intensity = 0.0
-    if ambient_intensity > 1:
-        ambient_intensity = 1.0
+    ambient_intensity = float(jnp.clip(ambient_intensity, 0.0, 1.0))
 
     batchsize = face_vertices.shape[0]
     num_faces = face_vertices.shape[1]
-    device = face_vertices.device
 
-    if ambient_color.dim() == 1:
-        ambient_color = ambient_color[None, :].to(device)
+    light = jnp.zeros((batchsize, num_faces, 3), dtype=face_vertices.dtype)
 
-    light = torch.zeros(batchsize, num_faces, 3).to(device)
-
-    # If the intensity of the ambient light is 0, do not
-    # bother computing lighting.
     if ambient_intensity == 0:
-        return light
+        return light[:, :, None, :]
 
-    # Ambient lighting is constant everywhere, and is given as
-    # I = I_a * K_a
-    # where,
-    # I: Intensity at a vertex
-    # I_a: Intensity of the ambient light
-    # K_a: Ambient reflectance of the vertex (3 channels, R, G, B)
-    light += ambient_intensity * ambient_color[:, None, :]
+    # I = I_a * K_a  (constant everywhere)
+    light = light + ambient_intensity * ambient_color[None, None, :]
 
     return light[:, :, None, :]
 
 
 def apply_ambient_light(
-    face_vertices: torch.Tensor,
-    textures: torch.Tensor,
+    face_vertices,
+    textures,
     ambient_intensity: float = 1.0,
-    ambient_color: torch.Tensor = torch.ones(3),
+    ambient_color=None,
 ):
-    r"""Computes and applies ambient lighting to a mesh, given faces and
-    face textures.
-
-    Args:
-        face_vertices (torch.Tensor): A tensor containing a list of (per-face)
-            vertices of the mesh (shape: `B` :math:`\times` `num_faces`
-            :math:`\times 9`). Here, :math:`B` is the batchsize, `num_faces`
-            is the number of faces in the mesh, and since each face is assumed
-            to be a triangle, it has 3 vertices, and hence 9 coordinates in
-            total.
-        textures (torch.Tensor): TODO: Add docstring
-        ambient_intensity (float): Intensity of ambient light (in the range
-            :math:`\left[0, 1\right]`). If the values provided are outside
-            this range, we clip them so that they fall in range.
-        ambient_color (torch.Tensor): Color of the ambient light (R, G, B)
-            (shape: :math:`3`)
-
-    Returns:
-        textures (torch.Tensor): Updated textures, with ambient lighting
-            applied (shape: same as input `textures`) #TODO: Update docstring
-
-    """
-
-    light = compute_ambient_light(
-        face_vertices, textures, ambient_intensity, ambient_color
-    )
+    r"""Computes and applies ambient lighting to textures."""
+    if ambient_color is None:
+        ambient_color = jnp.ones(3, dtype=face_vertices.dtype)
+    light = compute_ambient_light(face_vertices, textures, ambient_intensity, ambient_color)
     return textures * light
 
 
 def compute_directional_light(
-    face_vertices: torch.Tensor,
-    textures: torch.Tensor,
+    face_vertices,
+    textures,
     directional_intensity: float = 1.0,
-    directional_color: torch.Tensor = None,
-    direction: torch.Tensor = None,
+    directional_color=None,
+    direction=None,
 ):
-    r"""Computes directional lighting to a mesh, given faces and face textures.
+    r"""Computes directional lighting for a mesh.
 
     Args:
-        face_vertices (torch.Tensor): A tensor containing a list of (per-face)
-            vertices of the mesh (shape: `B` :math:`\times` `num_faces`
-            :math:`\times 9`). Here, :math:`B` is the batchsize, `num_faces`
-            is the number of faces in the mesh, and since each face is assumed
-            to be a triangle, it has 3 vertices, and hence 9 coordinates in
-            total.
-        textures (torch.Tensor): TODO: Add docstring
-        directional_intensity (float): Intensity of directional light (in the
-            range :math:`\left[0, 1\right]`). If the values provided are
-            outside this range, we clip them so that they fall in range.
-        directional_color (torch.Tensor): Color of the directional light
-            (R, G, B) (shape: :math:`3`).
-        direction (torch.Tensor): Direction of light from the light source.
-            (default: :math:`\left( 0, 1, 0 \right)^T`)
+        face_vertices: (B, F, 3, 3) per-face vertices.
+        textures: face textures array.
+        directional_intensity: scalar in [0, 1].
+        directional_color: (3,) RGB, defaults to ones.
+        direction: (3,) light direction, defaults to (0, 1, 0).
 
     Returns:
-        light (torch.Tensor): A light tensor, which can be elementwise
-            multiplied with the textures, to obtain the mesh with lighting
-            applied (shape: `B` :math:`\times` `num_faces` :math:`\times
-            1 \times 1 \times 1 \times 3`)
-
+        light: (B, F, 1, 3) light tensor.
     """
-
-    if not torch.is_tensor(face_vertices):
+    if not _is_array(face_vertices):
         raise TypeError(
-            "Expected input face_vertices to be of type "
-            "torch.Tensor. Got {0} instead.".format(type(face_vertices))
+            "Expected face_vertices to be an array. Got {0}.".format(type(face_vertices))
         )
-    if not torch.is_tensor(textures):
+    if not _is_array(textures):
         raise TypeError(
-            "Expected input textures to be of type "
-            "torch.Tensor. Got {0} instead.".format(type(textures))
+            "Expected textures to be an array. Got {0}.".format(type(textures))
         )
-    if not isinstance(directional_intensity, float) and not isinstance(
-        directional_intensity, int
-    ):
+    if not isinstance(directional_intensity, (float, int)):
         raise TypeError(
-            "Expected input directional_intensity to be of "
-            "type float. Got {0} instead.".format(type(directional_intensity))
+            "Expected directional_intensity to be float. Got {0}.".format(type(directional_intensity))
         )
     if directional_color is None:
-        directional_color = torch.ones(
-            3, dtype=face_vertices.dtype, device=face_vertices.device
-        )
-    if not torch.is_tensor(directional_color):
+        directional_color = jnp.ones(3, dtype=face_vertices.dtype)
+    if not _is_array(directional_color):
         raise TypeError(
-            "Expected input directional_color to be of type "
-            "torch.Tensor. Got {0} instead.".format(type(directional_color))
+            "Expected directional_color to be an array. Got {0}.".format(type(directional_color))
         )
     if direction is None:
-        direction = torch.tensor(
-            [0.0, 1.0, 0.0], dtype=face_vertices.dtype, device=face_vertices.device
-        )
-    if not torch.is_tensor(direction):
+        direction = jnp.array([0.0, 1.0, 0.0], dtype=face_vertices.dtype)
+    if not _is_array(direction):
         raise TypeError(
-            "Expected input direction to be of type "
-            "torch.Tensor. Got {0} instead.".format(type(direction))
+            "Expected direction to be an array. Got {0}.".format(type(direction))
+        )
+    if directional_color.ndim != 1 or directional_color.shape != (3,):
+        raise ValueError(
+            "directional_color must be shape (3,). Got {0}.".format(directional_color.shape)
+        )
+    if direction.ndim != 1 or direction.shape != (3,):
+        raise ValueError(
+            "direction must be shape (3,). Got {0}.".format(direction.shape)
         )
 
-    # if face_vertices.dim() != 3 or face_vertices.shape[-1] != 9:
-    #     raise ValueError('Input face_vertices must have 3 dimensions '
-    #                      'and be of shape (..., ..., 9). Got {0} dimensions '
-    #                      'and shape {1} instead.'.format(face_vertices.dim(),
-    #                                                      face_vertices.shape))
-    # TODO: check texture dims
-    if directional_color.dim() != 1 or directional_color.shape != (3,):
-        raise ValueError(
-            "Input directional_color must have 1 dimension "
-            "and be of shape 3. Got {0} dimensions and shape {1} "
-            "instead.".format(directional_color.dim(), directional_color.shape)
-        )
-    if direction.dim() != 1 or direction.shape != (3,):
-        raise ValueError(
-            "Input direction must have 1 dimension and be "
-            "of shape 3. Got {0} dimensions and shape {1} "
-            "instead.".format(direction.dim(), direction.shape)
-        )
+    directional_intensity = float(jnp.clip(directional_intensity, 0.0, 1.0))
 
     batchsize = face_vertices.shape[0]
     num_faces = face_vertices.shape[1]
-    device = face_vertices.device
 
-    if directional_color.dim() == 1:
-        directional_color = directional_color[None, :].to(device)
-    if direction.dim() == 1:
-        direction = direction[None, :].to(device)
+    light = jnp.zeros((batchsize, num_faces, 3), dtype=face_vertices.dtype)
 
-    # Clip directional intensity to be in the range [0, 1]
-    if directional_intensity < 0:
-        directional_intensity = 0.0
-    if directional_intensity > 1:
-        directional_intensity = 1.0
-
-    # Initialize light to zeros
-    light = torch.zeros(batchsize, num_faces, 3).to(device)
-
-    # If the intensity of the directional light is 0, do not
-    # bother computing lighting.
     if directional_intensity == 0:
-        return light
+        return light[:, :, None, :]
 
-    # Compute face normals.
-    v10 = face_vertices[:, :, 0] - face_vertices[:, :, 1]
-    v12 = face_vertices[:, :, 2] - face_vertices[:, :, 1]
-    normals = F.normalize(torch.linalg.cross(v12, v10), p=2, dim=2, eps=1e-6)
-    # Reshape, to get back the batchsize dimension.
-    normals = normals.reshape(batchsize, num_faces, 3)
+    # Compute face normals from per-face vertex positions (B, F, 3, 3)
+    v10 = face_vertices[:, :, 0] - face_vertices[:, :, 1]   # (B, F, 3)
+    v12 = face_vertices[:, :, 2] - face_vertices[:, :, 1]   # (B, F, 3)
+    normals = jnp.cross(v12, v10)                            # (B, F, 3)
+    n_len = jnp.linalg.norm(normals, axis=2, keepdims=True)
+    normals = normals / jnp.maximum(n_len, 1e-6)             # normalised
 
-    # Get direction to 3 dimensions, if not already there.
-    if direction.dim() == 2:
-        direction = direction[:, None, :]
+    # cos(angle between normal and light direction), clamped to [0, 1]
+    dir_bcast = direction[None, None, :]                     # (1, 1, 3)
+    cos = jnp.maximum(jnp.sum(normals * dir_bcast, axis=2), 0.0)  # (B, F)
 
-    cos = F.relu(torch.sum(normals * direction, dim=2))
-
-    light += directional_intensity * (directional_color[:, None, :] * cos[:, :, None])
+    light = (light
+             + directional_intensity
+             * directional_color[None, None, :]
+             * cos[:, :, None])
 
     return light[:, :, None, :]
 
 
 def apply_directional_light(
-    face_vertices: torch.Tensor,
-    textures: torch.Tensor,
+    face_vertices,
+    textures,
     directional_intensity: float = 1.0,
-    directional_color: torch.Tensor = torch.ones(3),
-    direction: torch.Tensor = torch.FloatTensor([0, 1, 0]),
+    directional_color=None,
+    direction=None,
 ):
-    r"""Computes and applies directional lighting to a mesh, given faces
-    and face textures.
-
-    Args:
-        face_vertices (torch.Tensor): A tensor containing a list of (per-face)
-            vertices of the mesh (shape: `B` :math:`\times` `num_faces`
-            :math:`\times 9`). Here, :math:`B` is the batchsize, `num_faces`
-            is the number of faces in the mesh, and since each face is assumed
-            to be a triangle, it has 3 vertices, and hence 9 coordinates in
-            total.
-        textures (torch.Tensor): TODO: Add docstring
-        directional_intensity (float): Intensity of directional light (in the
-            range :math:`\left[0, 1\right]`). If the values provided are
-            outside this range, we clip them so that they fall in range.
-        directional_color (torch.Tensor): Color of the directional light
-            (R, G, B) (shape: :math:`3`).
-        direction (torch.Tensor): Direction of light from the light source.
-            (default: :math:`\left( 0, 1, 0 \right)^T`)
-
-    Returns:
-        light (torch.Tensor): A light tensor, which can be elementwise
-            multiplied with the textures, to obtain the mesh with lighting
-            applied (shape: `B` :math:`\times` `num_faces` :math:`\times
-            1 \times 1 \times 1 \times 3`)
-
-    """
-
+    r"""Computes and applies directional lighting to textures."""
+    if directional_color is None:
+        directional_color = jnp.ones(3, dtype=face_vertices.dtype)
+    if direction is None:
+        direction = jnp.array([0.0, 1.0, 0.0], dtype=face_vertices.dtype)
     light = compute_directional_light(
         face_vertices, textures, directional_intensity, directional_color, direction
     )

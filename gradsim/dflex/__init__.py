@@ -25,10 +25,6 @@
 
 # Copyright (c) 2020-2021 NVIDIA Corporation. All rights reserved.
 
-from .adjoint import *
 # from .render import *
-from .sim import *
 from .util import *
-
-# compiles kernels
-kernel_init()
+from .model import *
