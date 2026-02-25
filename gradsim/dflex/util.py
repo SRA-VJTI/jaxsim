@@ -28,6 +28,7 @@
 import timeit
 import math
 import numpy as np
+import jax.numpy as jnp
 import gc
 import cProfile
 
@@ -89,17 +90,16 @@ def quat_from_axis_angle(axis, angle):
 
 # rotate a vector
 def quat_rotate(q, x):
-    axis = np.array((q[0], q[1], q[2]))
-    return x * (2.0 * q[3] * q[3] - 1.0) + np.cross(axis, x) * q[3] * 2.0 + axis * np.dot(axis, x) * 2.0
+    axis = q[0:3]   # vector part — use slicing so vmap / jit tracers work
+    return x * (2.0 * q[3] * q[3] - 1.0) + jnp.cross(axis, x) * q[3] * 2.0 + axis * jnp.dot(axis, x) * 2.0
 
 
 # multiply two quats
 def quat_multiply(a, b):
-
-    return np.array((a[3] * b[0] + b[3] * a[0] + a[1] * b[2] - b[1] * a[2],
-                     a[3] * b[1] + b[3] * a[1] + a[2] * b[0] - b[2] * a[0],
-                     a[3] * b[2] + b[3] * a[2] + a[0] * b[1] - b[0] * a[1],
-                     a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]))
+    return jnp.stack((a[3] * b[0] + b[3] * a[0] + a[1] * b[2] - b[1] * a[2],
+                      a[3] * b[1] + b[3] * a[1] + a[2] * b[0] - b[2] * a[0],
+                      a[3] * b[2] + b[3] * a[2] + a[0] * b[1] - b[0] * a[1],
+                      a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]))
 
 
 # convert to mat33
