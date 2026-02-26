@@ -1,33 +1,34 @@
 import math
-
-import torch
+import numpy as np
+import jax.numpy as jnp
 
 from gradsim.utils import quaternion
 
 
 def test_normalize():
-    quat = torch.randn(4)
-    assert torch.allclose(quaternion.normalize(quat).norm(), torch.ones(1), atol=1e-4)
+    rng = np.random.default_rng(0)
+    quat = jnp.array(rng.standard_normal(4), dtype=jnp.float32)
+    norm = float(jnp.linalg.norm(quaternion.normalize(quat)))
+    assert abs(norm - 1.0) < 1e-4
 
 
 def test_quaternion_to_rotmat():
-    # Create quaternion for rotation of pi radians about Y-axis; compare with rotmat.
-    axis = torch.tensor([0.0, 1.0, 0.0])
-    halfangle = torch.tensor([math.pi / 2])
-    cos = torch.cos(halfangle)
-    sin = torch.sin(halfangle)
-    quat = torch.cat((cos, sin * axis), dim=0)
-    rotmat = torch.tensor([[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0],])
-    assert torch.allclose(quaternion.quaternion_to_rotmat(quat), rotmat, atol=1e-5)
+    # Rotation of pi radians about Y-axis.
+    axis = jnp.array([0.0, 1.0, 0.0])
+    halfangle = jnp.array(math.pi / 2)
+    cos = jnp.cos(halfangle).reshape(1)
+    sin = jnp.sin(halfangle)
+    quat = jnp.concatenate([cos, sin * axis])
+    rotmat = jnp.array([[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]])
+    assert jnp.allclose(quaternion.quaternion_to_rotmat(quat), rotmat, atol=1e-5)
 
 
 def test_quaternion_multiply():
-    # Create quat for rotation of pi about Y-axis. Create another quat for rotation
-    # of -pi. Check if we get to identity.
-    axis = torch.tensor([0.0, 1.0, 0.0])
-    halfangle = torch.tensor([math.pi / 2])
-    q1 = torch.cat((torch.cos(halfangle), torch.sin(halfangle) * axis), dim=0)
-    q2 = torch.cat((torch.cos(-halfangle), torch.sin(-halfangle) * axis), dim=0)
-    assert torch.allclose(
-        quaternion.multiply(q1, q2), torch.tensor([1.0, 0.0, 0.0, 0.0])
+    # pi about Y + (-pi) about Y → identity.
+    axis = jnp.array([0.0, 1.0, 0.0])
+    halfangle = jnp.array(math.pi / 2)
+    q1 = jnp.concatenate([jnp.cos(halfangle).reshape(1), jnp.sin(halfangle) * axis])
+    q2 = jnp.concatenate([jnp.cos(-halfangle).reshape(1), jnp.sin(-halfangle) * axis])
+    assert jnp.allclose(
+        quaternion.multiply(q1, q2), jnp.array([1.0, 0.0, 0.0, 0.0]), atol=1e-6
     )

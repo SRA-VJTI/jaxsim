@@ -1,5 +1,5 @@
 import pytest
-import torch
+import jax.numpy as jnp
 
 from gradsim.bodies import RigidBody
 
@@ -9,7 +9,7 @@ def test_assertions():
 
 
 def test_create_body():
-    cube_verts = torch.FloatTensor(
+    cube_verts = jnp.array(
         [
             [1.0, 1.0, 1.0],
             [1.0, -1.0, 1.0],
@@ -19,6 +19,7 @@ def test_create_body():
             [-1.0, -1.0, 1.0],
             [-1.0, -1.0, -1.0],
             [-1.0, 1.0, -1.0],
-        ]
+        ],
+        dtype=jnp.float32,
     )
     cube = RigidBody(cube_verts)

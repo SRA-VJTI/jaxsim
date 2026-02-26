@@ -67,12 +67,12 @@ if __name__ == "__main__":
     attach1 = 20
 
     anchor0 = builder.add_particle(
-        pos=builder.particle_positions[attach0] - (1.0, 0.0, 0.0),
+        pos=np.array(builder.particle_x[attach0]) - np.array([1.0, 0.0, 0.0]),
         vel=(0.0, 0.0, 0.0),
         mass=0.0,
     )
     anchor1 = builder.add_particle(
-        pos=builder.particle_positions[attach1] + (1.0, 0.0, 0.0),
+        pos=np.array(builder.particle_x[attach1]) + np.array([1.0, 0.0, 0.0]),
         vel=(0.0, 0.0, 0.0),
         mass=0.0,
     )
@@ -99,7 +99,7 @@ if __name__ == "__main__":
     model.particle_inv_mass = inv_mass_vals.at[-1].set(0.0).at[-2].set(0.0)
 
     particle_inv_mass_gt = model.particle_inv_mass
-    particle_velocity_gt = model.particle_velocity
+    particle_velocity_gt = model.particle_v
 
     integrator = df.sim.SemiImplicitIntegrator()
 
@@ -159,12 +159,12 @@ if __name__ == "__main__":
         )
 
         anchor0_ = builder2.add_particle(
-            pos=builder2.particle_positions[attach0] - (1.0, 0.0, 0.0),
+            pos=np.array(builder2.particle_x[attach0]) - np.array([1.0, 0.0, 0.0]),
             vel=(0.0, 0.0, 0.0),
             mass=0.0,
         )
         anchor1_ = builder2.add_particle(
-            pos=builder2.particle_positions[attach1] + (1.0, 0.0, 0.0),
+            pos=np.array(builder2.particle_x[attach1]) + np.array([1.0, 0.0, 0.0]),
             vel=(0.0, 0.0, 0.0),
             mass=0.0,
         )
@@ -183,7 +183,7 @@ if __name__ == "__main__":
         model2.particle_radius = 0.01
         model2.ground = False
 
-        model2.particle_velocity = velocity_init + params_inner["velocity_update"]
+        model2.particle_v = velocity_init + params_inner["velocity_update"]
 
         integrator2 = df.sim.SemiImplicitIntegrator()
         state2 = model2.state()
@@ -239,7 +239,7 @@ if __name__ == "__main__":
                 mass=1.0,
             )
             model3 = builder3.finalize("cpu")
-            model3.particle_velocity = vel_cur
+            model3.particle_v = vel_cur
             integrator3 = df.sim.SemiImplicitIntegrator()
             state3 = model3.state()
             faces3 = model3.tri_indices

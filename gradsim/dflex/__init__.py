@@ -28,3 +28,4 @@
 # from .render import *
 from .util import *
 from .model import *
+from . import sim
