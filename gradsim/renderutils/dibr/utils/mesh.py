@@ -21,7 +21,6 @@
 import os
 
 import numpy as np
-import torch
 
 
 ##################################################################
@@ -154,18 +153,6 @@ def meshresample(pointnp_px3, facenp_fx3, edgenp_ex2):
         face2np_fx3.append([p12, p23, p31])
     face2np_fx3 = np.array(face2np_fx3, dtype=np.int64)
     return point2np_px3, face2np_fx3
-
-
-def mtx2tfsparse(mtx):
-    m, n = mtx.shape
-    rows, cols = np.nonzero(mtx)
-    # N = rows.shape[0]
-    # value = np.ones(shape=(N,), dtype=np.float32)
-    value = mtx[rows, cols]
-    v = torch.FloatTensor(value)
-    i = torch.LongTensor(np.stack((rows, cols), axis=0))
-    tfspmtx = torch.sparse.FloatTensor(i, v, torch.Size([m, n]))
-    return tfspmtx
 
 
 ################################################################
