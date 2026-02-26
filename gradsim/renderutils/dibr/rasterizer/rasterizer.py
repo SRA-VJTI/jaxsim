@@ -1,299 +1,175 @@
 # Copyright (c) 2020, NVIDIA CORPORATION. All rights reserved.
-
-# Permission is hereby granted, free of charge, to any person obtaining a
-# copy of this software and associated documentation files (the "Software"),
-# to deal in the Software without restriction, including without limitation
-# the rights to use, copy, modify, merge, publish, distribute, sublicense,
-# and/or sell copies of the Software, and to permit persons to whom the
-# Software is furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
-# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-# DEALINGS IN THE SOFTWARE.
+#
+# Licensed under the MIT License (see original file for full text).
+#
+# Pure JAX Z-buffer rasterizer replacing the CUDA LinearRasterizer.
+# Gradients flow automatically via JAX autodiff.
 
 from __future__ import division, print_function
 
-import datetime
-
-import torch
-import torch.autograd
-import torch.nn
-from torch.autograd import Function
-
-from ..cuda import rasterizer as cuda_rasterizer
+import jax
+import jax.numpy as jnp
 
 
-@torch.jit.script
-def prepare_tfpoints(
-    tfpoints3d_bxfx9,
-    tfpoints2d_bxfx6,
-    multiplier: float,
-    batch_size: int,
-    num_faces: int,
-    expand: float,
+def _seg_sq(px_, py_, ax, ay, bx, by):
+    """Squared distance from point (px_, py_) to segment [a, b]."""
+    abx = bx - ax
+    aby = by - ay
+    apx = px_ - ax
+    apy = py_ - ay
+    denom = abx * abx + aby * aby + 1e-20
+    t = jnp.clip((apx * abx + apy * aby) / denom, 0.0, 1.0)
+    cx = ax + t * abx
+    cy = ay + t * aby
+    return (px_ - cx) ** 2 + (py_ - cy) ** 2
+
+
+def linear_rasterizer(
+    height,
+    width,
+    points3d_bxfx9,
+    points2d_bxfx6,
+    normalz_bxfx1,
+    vertex_attr_bxfx3d,
+    expand=0.02,
+    knum=30,
+    multiplier=1000.0,
+    delta=7000.0,
 ):
-    # avoid numeric error
-    tfpoints2dmul_bxfx6 = multiplier * tfpoints2d_bxfx6
+    r"""Pure JAX differentiable Z-buffer rasterizer (replaces CUDA LinearRasterizer).
 
-    # bbox
-    tfpoints2d_bxfx3x2 = tfpoints2dmul_bxfx6.view(batch_size, num_faces, 3, 2)
-    tfpoints_min = torch.min(tfpoints2d_bxfx3x2, dim=2)[0]
-    tfpoints_max = torch.max(tfpoints2d_bxfx3x2, dim=2)[0]
-    tfpointsbbox_bxfx4 = torch.cat((tfpoints_min, tfpoints_max), dim=2)
+    Args:
+        height (int): Output image height H.
+        width (int): Output image width W.
+        points3d_bxfx9 (jnp.ndarray): (B, F, 9) per-face 3-D vertices in
+            camera space [v0.xyz, v1.xyz, v2.xyz].  z < 0 for visible objects
+            (OpenGL convention: camera looks in -Z direction).
+        points2d_bxfx6 (jnp.ndarray): (B, F, 6) per-face projected 2-D screen
+            coords [v0.xy, v1.xy, v2.xy] in NDC-like space.  After ×
+            ``multiplier`` they lie in pixel units centred at (0, 0).
+        normalz_bxfx1 (jnp.ndarray): (B, F, 1) z-component of face normal.
+            Positive ⇒ front-facing.
+        vertex_attr_bxfx3d (jnp.ndarray): (B, F, 3·D) packed per-vertex
+            attributes [v0_attrs(D), v1_attrs(D), v2_attrs(D)].
+        expand (float): Unused (kept for API compatibility).
+        knum (int): Unused (kept for API compatibility).
+        multiplier (float): Scale factor for 2-D coords (default 1000).
+        delta (float): Sharpness of soft-probability sigmoid (default 7000).
 
-    # bbox2
-    tfpoints_min = tfpoints_min - expand * multiplier
-    tfpoints_max = tfpoints_max + expand * multiplier
-    tfpointsbbox2_bxfx4 = torch.cat((tfpoints_min, tfpoints_max), dim=2)
+    Returns:
+        imfeat_bxhxwxd (jnp.ndarray): (B, H, W, D) barycentric-interpolated
+            vertex attributes at each pixel.
+        improb_bxhxwx1 (jnp.ndarray): (B, H, W, 1) soft occupancy probability.
+    """
+    H, W = height, width
+    B, F = points3d_bxfx9.shape[:2]
+    D = vertex_attr_bxfx3d.shape[2] // 3
 
-    # depth
-    _tfpoints3d_bxfx9 = tfpoints3d_bxfx9.permute(2, 0, 1)
-    tfpointsdep_bxfx1 = (
-        _tfpoints3d_bxfx9[2, :, :]
-        + _tfpoints3d_bxfx9[5, :, :]
-        + _tfpoints3d_bxfx9[8, :, :]
-    ).unsqueeze(-1) / 3.0
+    # ── scale 2-D coords to pixel space (centred at 0) ──────────────────────
+    pts2d = (multiplier * points2d_bxfx6).reshape(B, F, 3, 2)  # (B, F, 3, 2)
 
-    return (
-        tfpoints2dmul_bxfx6,
-        tfpointsbbox_bxfx4,
-        tfpointsbbox2_bxfx4,
-        tfpointsdep_bxfx1,
-    )
+    # Per-face 2-D vertex positions: (B, F, 1, 1)
+    v0x = pts2d[:, :, 0, 0, None, None]
+    v0y = pts2d[:, :, 0, 1, None, None]
+    v1x = pts2d[:, :, 1, 0, None, None]
+    v1y = pts2d[:, :, 1, 1, None, None]
+    v2x = pts2d[:, :, 2, 0, None, None]
+    v2y = pts2d[:, :, 2, 1, None, None]
 
+    # ── pixel grid (pixel centres; x right, y up) ───────────────────────────
+    xs = jnp.linspace(-W / 2.0 + 0.5, W / 2.0 - 0.5, W)           # (W,)
+    ys = jnp.linspace(H / 2.0 - 0.5, -H / 2.0 + 0.5, H)           # (H,) top→bottom
+    px, py = jnp.meshgrid(xs, ys)                                    # (H, W)
+    px = px[None, None]   # (1, 1, H, W)
+    py = py[None, None]
 
-class LinearRasterizer(Function):
-    @staticmethod
-    def forward(
-        ctx,
-        width,
-        height,
-        tfpoints3d_bxfx9,
-        tfpoints2d_bxfx6,
-        tfnormalz_bxfx1,
-        vertex_attr_bxfx3d,
-        expand=None,
-        knum=None,
-        multiplier=None,
-        delta=None,
-        debug=False,
-    ):
+    # ── inside / outside test for every face × pixel ─────────────────────────
+    d0 = (v1x - v0x) * (py - v0y) - (v1y - v0y) * (px - v0x)      # (B, F, H, W)
+    d1 = (v2x - v1x) * (py - v1y) - (v2y - v1y) * (px - v1x)
+    d2 = (v0x - v2x) * (py - v2y) - (v0y - v2y) * (px - v2x)
+    inside = (((d0 >= 0) & (d1 >= 0) & (d2 >= 0)) |
+              ((d0 <= 0) & (d1 <= 0) & (d2 <= 0)))                  # (B, F, H, W)
 
-        if expand is None:
-            expand = 0.02
-        if knum is None:
-            knum = 30
-        if multiplier is None:
-            multiplier = 1000
-        if delta is None:
-            delta = 7000
+    # ── front-face culling (normalz > 0 → front-facing) ──────────────────────
+    is_front = (normalz_bxfx1[:, :, 0] > 0)[:, :, None, None]      # (B, F, 1, 1)
+    inside_and_front = inside & is_front                             # (B, F, H, W)
 
-        batch_size = tfpoints3d_bxfx9.shape[0]
-        num_faces = tfpoints3d_bxfx9.shape[1]
+    # ── Z-buffer: centroid depth (camera z — larger = closer) ────────────────
+    z_face = (points3d_bxfx9[:, :, 2] +
+              points3d_bxfx9[:, :, 5] +
+              points3d_bxfx9[:, :, 8]) / 3.0                        # (B, F)
+    z_face = z_face[:, :, None, None]                                # (B, F, 1, 1)
 
-        num_vertex_attr = vertex_attr_bxfx3d.shape[2] / 3
-        assert num_vertex_attr == int(
-            num_vertex_attr
-        ), "vertex_attr_bxfx3d has shape {} which is not a multiple of 3".format(
-            vertex_attr_bxfx3d.shape[2]
-        )
+    depth_map = jnp.where(
+        inside_and_front,
+        jnp.broadcast_to(z_face, (B, F, H, W)),
+        -jnp.inf
+    )                                                                 # (B, F, H, W)
 
-        num_vertex_attr = int(num_vertex_attr)
+    best_face = jnp.argmax(depth_map, axis=1)                        # (B, H, W)
+    any_coverage = jnp.any(inside_and_front, axis=1)                 # (B, H, W)
 
-        ###################################################
-        start = datetime.datetime.now()
+    # ── gather winning-face 2-D vertices ─────────────────────────────────────
+    b_idx = jnp.arange(B)[:, None, None]                             # (B, 1, 1)
+    pts2d_best = pts2d[b_idx, best_face]                             # (B, H, W, 3, 2)
 
-        (
-            tfpoints2dmul_bxfx6,
-            tfpointsbbox_bxfx4,
-            tfpointsbbox2_bxfx4,
-            tfpointsdep_bxfx1,
-        ) = prepare_tfpoints(
-            tfpoints3d_bxfx9,
-            tfpoints2d_bxfx6,
-            multiplier,
-            batch_size,
-            num_faces,
-            expand,
-        )
+    v0x_b = pts2d_best[..., 0, 0]   # (B, H, W)
+    v0y_b = pts2d_best[..., 0, 1]
+    v1x_b = pts2d_best[..., 1, 0]
+    v1y_b = pts2d_best[..., 1, 1]
+    v2x_b = pts2d_best[..., 2, 0]
+    v2y_b = pts2d_best[..., 2, 1]
 
-        device = tfpoints2dmul_bxfx6.device
+    # ── pixel coords broadcast to (B, H, W) ──────────────────────────────────
+    px_g = jnp.broadcast_to(px[0, 0][None], (B, H, W))              # (B, H, W)
+    py_g = jnp.broadcast_to(py[0, 0][None], (B, H, W))
 
-        # output
-        tfimidxs_bxhxwx1 = torch.zeros(
-            batch_size, height, width, 1, dtype=torch.float32, device=device
-        )
-        # set depth as very far
-        tfimdeps_bxhxwx1 = torch.full(
-            (batch_size, height, width, 1),
-            fill_value=-1000.0,
-            dtype=torch.float32,
-            device=device,
-        )
-        tfimweis_bxhxwx3 = torch.zeros(
-            batch_size, height, width, 3, dtype=torch.float32, device=device
-        )
-        tfims_bxhxwxd = torch.zeros(
-            batch_size,
-            height,
-            width,
-            num_vertex_attr,
-            dtype=torch.float32,
-            device=device,
-        )
-        tfimprob_bxhxwx1 = torch.zeros(
-            batch_size, height, width, 1, dtype=torch.float32, device=device
-        )
+    # ── barycentric coordinates at each pixel for the best face ──────────────
+    denom = ((v1x_b - v0x_b) * (v2y_b - v0y_b) -
+             (v1y_b - v0y_b) * (v2x_b - v0x_b) + 1e-20)
+    bary1 = ((px_g - v0x_b) * (v2y_b - v0y_b) -
+             (py_g - v0y_b) * (v2x_b - v0x_b)) / denom
+    bary2 = ((v1x_b - v0x_b) * (py_g - v0y_b) -
+             (v1y_b - v0y_b) * (px_g - v0x_b)) / denom
+    bary0 = 1.0 - bary1 - bary2
+    # Clamp and renormalise (gracefully handles pixels outside the triangle)
+    bary0 = jnp.clip(bary0, 0.0, 1.0)
+    bary1 = jnp.clip(bary1, 0.0, 1.0)
+    bary2 = jnp.clip(bary2, 0.0, 1.0)
+    bary_s = bary0 + bary1 + bary2 + 1e-20
+    bary0 /= bary_s
+    bary1 /= bary_s
+    bary2 /= bary_s
 
-        # intermidiate varibales
-        tfprobface = torch.zeros(
-            batch_size, height, width, knum, dtype=torch.float32, device=device
-        )
-        tfprobcase = torch.zeros(
-            batch_size, height, width, knum, dtype=torch.float32, device=device
-        )
-        tfprobdis = torch.zeros(
-            batch_size, height, width, knum, dtype=torch.float32, device=device
-        )
-        tfprobdep = torch.zeros(
-            batch_size, height, width, knum, dtype=torch.float32, device=device
-        )
-        tfprobacc = torch.zeros(
-            batch_size, height, width, knum, dtype=torch.float32, device=device
-        )
+    # ── interpolate vertex attributes ─────────────────────────────────────────
+    attrs = vertex_attr_bxfx3d.reshape(B, F, 3, D)                  # (B, F, 3, D)
+    attrs_best = attrs[b_idx, best_face]                             # (B, H, W, 3, D)
 
-        # face direction
-        tfpointsdirect_bxfx1 = tfnormalz_bxfx1.contiguous()
-        cuda_rasterizer.forward(
-            tfpoints3d_bxfx9,
-            tfpoints2dmul_bxfx6,
-            tfpointsdirect_bxfx1,
-            tfpointsbbox_bxfx4,
-            tfpointsbbox2_bxfx4,
-            tfpointsdep_bxfx1,
-            vertex_attr_bxfx3d,
-            tfimidxs_bxhxwx1,
-            tfimdeps_bxhxwx1,
-            tfimweis_bxhxwx3,
-            tfprobface,
-            tfprobcase,
-            tfprobdis,
-            tfprobdep,
-            tfprobacc,
-            tfims_bxhxwxd,
-            tfimprob_bxhxwx1,
-            multiplier,
-            delta,
-        )
+    imfeat = (bary0[..., None] * attrs_best[..., 0, :] +
+              bary1[..., None] * attrs_best[..., 1, :] +
+              bary2[..., None] * attrs_best[..., 2, :])              # (B, H, W, D)
+    imfeat = jnp.where(any_coverage[..., None], imfeat, 0.0)
 
-        end = datetime.datetime.now()
-        ###################################################
+    # ── soft probability (sigmoid of signed distance in pixel space) ──────────
+    d01 = _seg_sq(px_g, py_g, v0x_b, v0y_b, v1x_b, v1y_b)
+    d12 = _seg_sq(px_g, py_g, v1x_b, v1y_b, v2x_b, v2y_b)
+    d20 = _seg_sq(px_g, py_g, v2x_b, v2y_b, v0x_b, v0y_b)
+    d_sq = jnp.minimum(jnp.minimum(d01, d12), d20)
 
-        debug_im = torch.zeros(
-            batch_size, height, width, 3, dtype=torch.float32, device=device
-        )
+    # Inside test for winning face
+    d0b = (v1x_b - v0x_b) * (py_g - v0y_b) - (v1y_b - v0y_b) * (px_g - v0x_b)
+    d1b = (v2x_b - v1x_b) * (py_g - v1y_b) - (v2y_b - v1y_b) * (px_g - v1x_b)
+    d2b = (v0x_b - v2x_b) * (py_g - v2y_b) - (v0y_b - v2y_b) * (px_g - v2x_b)
+    inside_best = (((d0b >= 0) & (d1b >= 0) & (d2b >= 0)) |
+                   ((d0b <= 0) & (d1b <= 0) & (d2b <= 0)))
 
-        ctx.save_for_backward(
-            tfims_bxhxwxd,
-            tfimprob_bxhxwx1,
-            tfimidxs_bxhxwx1,
-            tfimweis_bxhxwx3,
-            tfpoints2dmul_bxfx6,
-            vertex_attr_bxfx3d,
-            tfprobface,
-            tfprobcase,
-            tfprobdis,
-            tfprobdep,
-            tfprobacc,
-            debug_im,
-        )
+    dist_signed = jnp.where(inside_best, -d_sq, d_sq)
+    improb = jax.nn.sigmoid(-dist_signed * delta)
+    improb = jnp.where(any_coverage, improb, 0.0)
+    improb_bxhxwx1 = improb[..., None]                              # (B, H, W, 1)
 
-        ctx.multiplier = multiplier
-        ctx.delta = delta
-        ctx.debug = debug
-
-        tfims_bxhxwxd.requires_grad = True
-        tfimprob_bxhxwx1.requires_grad = True
-
-        return tfims_bxhxwxd, tfimprob_bxhxwx1
-
-    @staticmethod
-    def backward(ctx, dldI_bxhxwxd, dldp_bxhxwx1):
-        (
-            tfims_bxhxwxd,
-            tfimprob_bxhxwx1,
-            tfimidxs_bxhxwx1,
-            tfimweis_bxhxwx3,
-            tfpoints2dmul_bxfx6,
-            tfcolors_bxfx3d,
-            tfprobface,
-            tfprobcase,
-            tfprobdis,
-            tfprobdep,
-            tfprobacc,
-            debug_im,
-        ) = ctx.saved_variables
-
-        multiplier = ctx.multiplier
-        delta = ctx.delta
-        debug = ctx.debug
-        # avoid numeric error
-        # multiplier = 1000
-        # tfpoints2d_bxfx6 *= multiplier
-
-        dldp2 = torch.zeros_like(tfpoints2dmul_bxfx6)
-        dldp2_prob = torch.zeros_like(tfpoints2dmul_bxfx6)
-        dldc = torch.zeros_like(tfcolors_bxfx3d)
-        cuda_rasterizer.backward(
-            dldI_bxhxwxd.contiguous(),
-            dldp_bxhxwx1.contiguous(),
-            tfims_bxhxwxd,
-            tfimprob_bxhxwx1,
-            tfimidxs_bxhxwx1,
-            tfimweis_bxhxwx3,
-            tfprobface,
-            tfprobcase,
-            tfprobdis,
-            tfprobdep,
-            tfprobacc,
-            tfpoints2dmul_bxfx6,
-            tfcolors_bxfx3d,
-            dldp2,
-            dldc,
-            dldp2_prob,
-            debug_im,
-            multiplier,
-            delta,
-        )
-        if debug:
-            print(dldc[dldc > 0.1])
-            print(dldc[dldc > 0.1].shape)
-            print(dldp2[dldp2 > 0.1])
-            print(dldp2[dldp2 > 0.1].shape)
-            print(dldp2_prob[dldp2_prob > 0.1])
-            print(dldp2_prob[dldp2_prob > 0.1].shape)
-
-        return (
-            None,
-            None,
-            None,
-            dldp2 + dldp2_prob,
-            None,
-            dldc,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+    return imfeat, improb_bxhxwx1
 
 
-linear_rasterizer = LinearRasterizer.apply
+# Alias matching the original API
+linear_rasterizer = linear_rasterizer

@@ -1,63 +1,56 @@
 # Copyright (c) 2019, NVIDIA CORPORATION. All rights reserved.
-
-# Permission is hereby granted, free of charge, to any person obtaining a
-# copy of this software and associated documentation files (the "Software"),
-# to deal in the Software without restriction, including without limitation
-# the rights to use, copy, modify, merge, publish, distribute, sublicense,
-# and/or sell copies of the Software, and to permit persons to whom the
-# Software is furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
-# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-# DEALINGS IN THE SOFTWARE.
+# Licensed under the MIT License.
+#
+# Pure JAX replacement — no torch dependency.
 
 from __future__ import division, print_function
 
-import torch
-import torch.nn
+import jax.numpy as jnp
 
 
-##################################################
 def perspective_projection(points_bxpx3, faces_fx3, cameras):
+    """Project 3-D mesh vertices through a pinhole camera and gather per-face data.
 
-    # perspective, use just one camera intrinc parameter
+    Args:
+        points_bxpx3: (B, P, 3) world-space vertices.
+        faces_fx3: (F, 3) face vertex indices (shared across batch).
+        cameras: tuple (camera_rot_bx3x3, camera_pos_bx3, camera_proj_3x1)
+            camera_rot_bx3x3 : (B, 3, 3) rotation matrix (world→cam axes as rows)
+            camera_pos_bx3   : (B, 3)    camera position in world space
+            camera_proj_3x1  : (B, 3, 1) or (1, 3, 1)  [[fx], [fy], [-1]]
+
+    Returns:
+        points3d_bxfx9: (B, F, 9)  per-face camera-space vertices [v0,v1,v2]
+        points2d_bxfx6: (B, F, 6)  per-face projected 2-D coords [v0.xy, v1.xy, v2.xy]
+        normal_bxfx3  : (B, F, 3)  unnormalised face normals in camera space
+    """
     camera_rot_bx3x3, camera_pos_bx3, camera_proj_3x1 = cameras
-    cameratrans_rot_bx3x3 = camera_rot_bx3x3.permute(0, 2, 1)
+    # camera_rot rows are [right, up, backward]; transpose gives columns = axes
+    cameratrans_rot_bx3x3 = jnp.transpose(camera_rot_bx3x3, (0, 2, 1))  # (B,3,3)
 
-    # follow pixel2mesh!!!
-    # new_p = cam_mat * (old_p - cam_pos)
-    points_bxpx3 = points_bxpx3 - camera_pos_bx3.view(-1, 1, 3)
-    points_bxpx3 = torch.matmul(points_bxpx3, cameratrans_rot_bx3x3)
+    # Transform to camera space: p_cam = (p_world - cam_pos) @ cam_rot^T
+    points_bxpx3 = points_bxpx3 - camera_pos_bx3[:, None, :]              # (B,P,3)
+    points_bxpx3 = jnp.matmul(points_bxpx3, cameratrans_rot_bx3x3)       # (B,P,3)
 
-    camera_proj_bx1x3 = camera_proj_3x1.view(-1, 1, 3)
-    xy_bxpx3 = points_bxpx3 * camera_proj_bx1x3
-    xy_bxpx2 = xy_bxpx3[:, :, :2] / xy_bxpx3[:, :, 2:3]
+    # Perspective projection: [x*fx, y*fy, z*(-1)] → divide x,y by third coord
+    camera_proj_bx1x3 = camera_proj_3x1.reshape(-1, 1, 3)                 # (B,1,3)
+    xy_bxpx3 = points_bxpx3 * camera_proj_bx1x3                           # (B,P,3)
+    xy_bxpx2 = xy_bxpx3[:, :, :2] / xy_bxpx3[:, :, 2:3]                  # (B,P,2)
 
-    ##########################################################
-    # 1 points
-    pf0_bxfx3 = points_bxpx3[:, faces_fx3[:, 0], :]
+    # Gather per-face 3-D and 2-D vertex data
+    pf0_bxfx3 = points_bxpx3[:, faces_fx3[:, 0], :]                       # (B,F,3)
     pf1_bxfx3 = points_bxpx3[:, faces_fx3[:, 1], :]
     pf2_bxfx3 = points_bxpx3[:, faces_fx3[:, 2], :]
-    points3d_bxfx9 = torch.cat((pf0_bxfx3, pf1_bxfx3, pf2_bxfx3), dim=2)
+    points3d_bxfx9 = jnp.concatenate([pf0_bxfx3, pf1_bxfx3, pf2_bxfx3], axis=2)
 
     xy_f0 = xy_bxpx2[:, faces_fx3[:, 0], :]
     xy_f1 = xy_bxpx2[:, faces_fx3[:, 1], :]
     xy_f2 = xy_bxpx2[:, faces_fx3[:, 2], :]
-    points2d_bxfx6 = torch.cat((xy_f0, xy_f1, xy_f2), dim=2)
+    points2d_bxfx6 = jnp.concatenate([xy_f0, xy_f1, xy_f2], axis=2)
 
-    ######################################################
-    # 2 normals
+    # Face normals (unnormalised)
     v01_bxfx3 = pf1_bxfx3 - pf0_bxfx3
     v02_bxfx3 = pf2_bxfx3 - pf0_bxfx3
-
-    # bs cannot be 3, if it is 3, we must specify dim
-    normal_bxfx3 = torch.linalg.cross(v01_bxfx3, v02_bxfx3, dim=2)
+    normal_bxfx3 = jnp.cross(v01_bxfx3, v02_bxfx3, axis=2)
 
     return points3d_bxfx9, points2d_bxfx6, normal_bxfx3

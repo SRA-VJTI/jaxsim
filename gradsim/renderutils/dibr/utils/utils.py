@@ -20,13 +20,12 @@
 
 from __future__ import division, print_function
 
-import torch
-import torch.nn
+import jax.numpy as jnp
 
 eps = 1e-15
 
 
 ##################################################
 def datanormalize(data, axis):
-    datalen = torch.sqrt(torch.sum(data ** 2, dim=axis, keepdim=True))
+    datalen = jnp.sqrt(jnp.sum(data ** 2, axis=axis, keepdims=True))
     return data / (datalen + eps)
