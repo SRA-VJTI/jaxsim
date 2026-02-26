@@ -1061,6 +1061,7 @@ class ModelBuilder:
                        fix_top=False,
                        fix_bottom=False):
 
+        pos = np.array(pos)
         start_vertex = len(self.particle_x)
         start_tri = len(self.tri_indices)
 
@@ -1126,6 +1127,7 @@ class ModelBuilder:
 
     def add_cloth_mesh(self, pos, rot, scale, vel, vertices, indices, density, edge_callback=None, face_callback=None):
 
+        pos = np.array(pos)
         num_tris = int(len(indices) / 3)
 
         start_vertex = len(self.particle_x)
@@ -1278,6 +1280,7 @@ class ModelBuilder:
 
     def add_soft_mesh(self, pos, rot, scale, vel, vertices, indices, density, k_mu, k_lambda, k_damp):
 
+        pos = np.array(pos)
         num_tets = int(len(indices) / 4)
 
         start_vertex = len(self.particle_x)

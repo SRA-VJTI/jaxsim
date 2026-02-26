@@ -19,6 +19,24 @@ except ImportError:
     pass
 
 
+def _adam_init(params):
+    return {k: {"m": jnp.zeros_like(v), "v": jnp.zeros_like(v), "t": 0}
+            for k, v in params.items()}
+
+
+def _adam_step(params, grads, state, lr, beta1=0.5, beta2=0.99, eps=1e-8):
+    new_params, new_state = {}, {}
+    for k in params:
+        t = state[k]["t"] + 1
+        m = beta1 * state[k]["m"] + (1 - beta1) * grads[k]
+        v = beta2 * state[k]["v"] + (1 - beta2) * grads[k] ** 2
+        m_hat = m / (1 - beta1 ** t)
+        v_hat = v / (1 - beta2 ** t)
+        new_params[k] = params[k] - lr * m_hat / (jnp.sqrt(v_hat) + eps)
+        new_state[k] = {"m": m, "v": v, "t": t}
+    return new_params, new_state
+
+
 def read_tet_mesh(filepath):
     vertices = []
     faces = []
@@ -31,9 +49,7 @@ def read_tet_mesh(filepath):
                 vertices.append([float(d) for d in data[1:]])
             elif data[0] == "t":
                 faces.append([int(d) for d in data[1:]])
-    # vertices = torch.tensor([float(el) for sublist in vertices for el in sublist]).view(-1, 3)
-    # faces = torch.tensor(faces, dtype=torch.long)
-    vertices = [tuple(v) for v in vertices]  # Does not seem to work
+    vertices = [tuple(v) for v in vertices]
     vertices = np.asarray(vertices).astype(np.float32)
     faces = [f for face in faces for f in face]
     return vertices, faces
@@ -41,9 +57,7 @@ def read_tet_mesh(filepath):
 
 if __name__ == "__main__":
 
-    # Get an argument parser with base-level arguments already filled in.
     dflex_base_parser = get_dflex_base_parser()
-    # Create a new parser that inherits these arguments.
     parser = argparse.ArgumentParser(
         parents=[dflex_base_parser], conflict_handler="resolve"
     )
@@ -104,10 +118,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(args)
 
-    torch.autograd.set_detect_anomaly(True)
-
-    torch.manual_seed(args.seed)
-
     logdir = os.path.join(args.logdir, args.expid)
     if args.log:
         os.makedirs(logdir, exist_ok=True)
@@ -125,14 +135,10 @@ if __name__ == "__main__":
     builder = df.sim.ModelBuilder()
 
     if args.mesh[-4:] == "usda":
-
         mesh = Usd.Stage.Open(args.mesh)
         geom = UsdGeom.Mesh(mesh.GetPrimAtPath("/mesh"))
         points = geom.GetPointsAttr().Get()
         tet_indices = geom.GetPrim().GetAttribute("tetraIndices").Get()
-        # tri_indices = geom.GetFaceVertexIndicesAttr().Get()
-        # tri_counts = geom.GetFaceVertexCountsAttr().Get()
-
     elif args.mesh[-3:] == "tet":
         points, tet_indices = read_tet_mesh(args.mesh)
 
@@ -176,14 +182,12 @@ if __name__ == "__main__":
 
     model.particle_radius = 0.05
     model.ground = True
-    # model.gravity = torch.tensor((0.0, 0.0, 0.0), dtype=torch.float32, requires_grad=False)
 
-    rest_angle = model.edge_rest_angle
-
-    # one fully connected layer + tanh activation
-    network = torch.nn.Sequential(
-        torch.nn.Linear(phase_count, model.tet_count, bias=False), torch.nn.Tanh()
-    )
+    # Replace torch.nn.Sequential with weight matrix W
+    # network: Linear(phase_count, tet_count, bias=False) + Tanh
+    # forward: jnp.tanh(phases @ W) * activation_strength
+    params = {"W": jnp.zeros((phase_count, model.tet_count), dtype=jnp.float32)}
+    opt_state = _adam_init(params)
 
     activation_strength = 0.3
     activation_penalty = 0.0
@@ -192,154 +196,148 @@ if __name__ == "__main__":
 
     integrator = df.sim.SemiImplicitIntegrator()
 
-    # Setup SoftRasterizer
-    device = "cuda:0"
-    renderer = SoftRenderer(camera_mode="look_at", device=device)
+    renderer = SoftRenderer(camera_mode="look_at")
     camera_distance = 13.0
     elevation = 30.0
     azimuth = 0.0
     renderer.set_eye_from_angles(camera_distance, elevation, azimuth)
 
     faces = model.tri_indices
-    textures = torch.cat(
+    textures = jnp.concatenate(
         (
-            torch.ones(1, faces.shape[-2], 2, 1, dtype=torch.float32, device=device),
-            torch.ones(1, faces.shape[-2], 2, 1, dtype=torch.float32, device=device),
-            torch.zeros(1, faces.shape[-2], 2, 1, dtype=torch.float32, device=device),
+            jnp.ones((1, faces.shape[-2], 2, 1), dtype=jnp.float32),
+            jnp.ones((1, faces.shape[-2], 2, 1), dtype=jnp.float32),
+            jnp.zeros((1, faces.shape[-2], 2, 1), dtype=jnp.float32),
         ),
-        dim=-1,
+        axis=-1,
     )
 
-    # target_image = imageio.imread(args.target)
-    # target_image = torch.from_numpy(target_image).float().to(device) / 255.0
-    # target_image = target_image.permute(2, 0, 1).unsqueeze(0)
-
-    target_position = torch.zeros(3, dtype=torch.float32)
-    target_position[0] = (0.0 - 5.0) * torch.rand(1) + 5.0
-    target_position[1] = 2.0
+    # Use deterministic target position
+    target_position = jnp.array([
+        float(np.random.rand() * 5.0 + 0.0) if args.method else 4.0,
+        2.0,
+        0.0,
+    ], dtype=jnp.float32)
     target_image = None
     print("Target position:", target_position)
-    with torch.no_grad():
-        gt_builder = df.sim.ModelBuilder()
-        gt_builder.add_soft_mesh(
-            pos=(target_position[0], target_position[1], target_position[2]),
-            rot=r,
-            scale=1.0,
-            vel=(1.5, 0.0, 0.0),
-            vertices=points,
-            indices=tet_indices,
-            density=1.0,
-            k_mu=TET_KM,
-            k_lambda=TET_KL,
-            k_damp=TET_KD,
-        )
-        gt_model = gt_builder.finalize("cpu")
-        gt_model.tet_kl = model.tet_kl
-        gt_model.tet_km = model.tet_km
-        gt_model.tet_kd = model.tet_kd
-        gt_model.tri_ke = model.tri_ke
-        gt_model.tri_ka = model.tri_ka
-        gt_model.tri_kd = model.tri_kd
-        gt_model.tri_kb = model.tri_kb
-        gt_model.contact_ke = model.contact_ke
-        gt_model.contact_kd = model.contact_kd
-        gt_model.contact_kf = model.contact_kf
-        gt_model.contact_mu = model.contact_mu
-        gt_model.particle_radius = model.particle_radius
-        gt_model.ground = model.ground
-        gt_state = gt_model.state()
-        device = "cuda:0"
-        target_image = renderer.forward(
-            gt_state.q.unsqueeze(0).to(device),
-            faces.unsqueeze(0).to(device),
-            textures.to(device),
-        )
-        if args.log:
-            imageio.imwrite(
-                os.path.join(logdir, "target_image.png"),
-                (target_image[0].permute(1, 2, 0).detach().cpu().numpy() * 255).astype(
-                    np.uint8
-                ),
-            )
-            np.savetxt(
-                os.path.join(logdir, "target_position.txt"),
-                target_position.detach().cpu().numpy(),
-            )
 
-    # optimizer = torch.optim.SGD(network.parameters(), lr=train_rate, momentum=0.5)
-    optimizer = torch.optim.Adam(network.parameters(), lr=args.lr)
+    gt_builder = df.sim.ModelBuilder()
+    gt_builder.add_soft_mesh(
+        pos=(float(target_position[0]), float(target_position[1]), float(target_position[2])),
+        rot=r,
+        scale=1.0,
+        vel=(1.5, 0.0, 0.0),
+        vertices=points,
+        indices=tet_indices,
+        density=1.0,
+        k_mu=TET_KM,
+        k_lambda=TET_KL,
+        k_damp=TET_KD,
+    )
+    gt_model = gt_builder.finalize("cpu")
+    gt_model.tet_kl = model.tet_kl
+    gt_model.tet_km = model.tet_km
+    gt_model.tet_kd = model.tet_kd
+    gt_model.tri_ke = model.tri_ke
+    gt_model.tri_ka = model.tri_ka
+    gt_model.tri_kd = model.tri_kd
+    gt_model.tri_kb = model.tri_kb
+    gt_model.contact_ke = model.contact_ke
+    gt_model.contact_kd = model.contact_kd
+    gt_model.contact_kf = model.contact_kf
+    gt_model.contact_mu = model.contact_mu
+    gt_model.particle_radius = model.particle_radius
+    gt_model.ground = model.ground
+    gt_state = gt_model.state()
+    target_image = renderer.forward(
+        gt_state.q[None, :],
+        faces[None, :],
+        textures,
+    )
+    if args.log:
+        imageio.imwrite(
+            os.path.join(logdir, "target_image.png"),
+            (np.array(target_image[0]).transpose(1, 2, 0) * 255).astype(np.uint8),
+        )
+        np.savetxt(
+            os.path.join(logdir, "target_position.txt"),
+            np.array(target_position),
+        )
 
     losses = []
     position_errors = []
 
-    try:
+    render_every = 60
 
-        for e in range(args.epochs):
+    def loss_fn(params_inner):
+        sim_time_inner = 0.0
+        state_inner = model.state()
+        imgs_inner = []
 
-            sim_time = 0.0
-
-            state = model.state()
-
-            loss = torch.zeros(1, requires_grad=True)
-
-            print_every = 60 * 32
-            render_every = 60
-
-            imgs = []
-
-            for i in trange(0, sim_steps):
-
-                phases = torch.zeros(phase_count)
-                for p in range(phase_count):
-                    phases[p] = math.sin(phase_freq * (sim_time + p * phase_step))
-                # compute activations (rest angles)
-                if args.method == "random":
-                    model.tet_activations = (
-                        (-1.0 - 1.0) * torch.rand(model.tet_count) + 1
-                    ) * activation_strength
-                else:
-                    model.tet_activations = network(phases) * activation_strength
-
-                state = integrator.forward(model, state, sim_dt)
-                sim_time += sim_dt
-
-                if i % render_every == 0:
-                    # with torch.no_grad():
-                    device = "cuda:0"
-                    rgba = renderer.forward(
-                        state.q.unsqueeze(0).to(device),
-                        faces.unsqueeze(0).to(device),
-                        textures.to(device),
-                    )
-                    imgs.append(rgba)
-
-            loss = torch.nn.functional.mse_loss(imgs[-1], target_image)
-            position_error = torch.nn.functional.mse_loss(
-                state.q.mean(0), target_position
-            )
-
-            tqdm.write(f"Loss: {loss.item():.5}")
-            tqdm.write(f"Position error: {position_error.item():.5}")
-
-            losses.append(loss.item())
-            position_errors.append(position_error.item())
+        for i in range(0, sim_steps):
+            phases = jnp.array([
+                math.sin(phase_freq * (sim_time_inner + p * phase_step))
+                for p in range(phase_count)
+            ], dtype=jnp.float32)
 
             if args.method == "random":
-                pass  # The random exploration baseline does not need backprop
+                model.tet_activations = jnp.array(
+                    (np.random.rand(model.tet_count) * 2 - 1) * activation_strength,
+                    dtype=jnp.float32,
+                )
             else:
-                if args.method == "noisy-physics-only":
-                    noisy_position_error = torch.nn.functional.mse_loss(
-                        state.q.mean(0),
-                        target_position
-                        + (torch.rand_like(target_position) * 0.1 * target_position),
-                    )
-                    noisy_position_error.backward()
-                elif args.method == "physics-only":
-                    position_error.backward()
-                elif args.method == "gradsim":
-                    loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
+                model.tet_activations = jnp.tanh(phases @ params_inner["W"]) * activation_strength
+
+            state_inner = integrator.forward(model, state_inner, sim_dt)
+            sim_time_inner += sim_dt
+
+            if i % render_every == 0:
+                rgba = renderer.forward(
+                    state_inner.q[None, :],
+                    faces[None, :],
+                    textures,
+                )
+                imgs_inner.append(rgba)
+
+        loss_inner = jnp.mean((imgs_inner[-1] - target_image) ** 2)
+        return loss_inner, imgs_inner, state_inner
+
+    grad_fn = jax.value_and_grad(lambda p: loss_fn(p)[0])
+
+    try:
+        for e in range(args.epochs):
+
+            if args.method == "random":
+                loss_val = 0.0
+                _, imgs, state_end = loss_fn(params)
+            elif args.method in ("physics-only", "noisy-physics-only"):
+                # Use position-based loss
+                def pos_loss_fn(p):
+                    _, _, s = loss_fn(p)
+                    pos_err = jnp.mean((jnp.mean(s.q, axis=0) - target_position) ** 2)
+                    if args.method == "noisy-physics-only":
+                        noise = jnp.array(
+                            np.random.rand(3) * 0.1,
+                            dtype=jnp.float32,
+                        )
+                        pos_err = jnp.mean((jnp.mean(s.q, axis=0) - (target_position + noise * target_position)) ** 2)
+                    return pos_err
+                pos_grad_fn = jax.value_and_grad(pos_loss_fn)
+                loss_val, grads = pos_grad_fn(params)
+                params, opt_state = _adam_step(params, grads, opt_state, lr=args.lr)
+                _, imgs, state_end = loss_fn(params)
+            else:
+                loss_val, grads = grad_fn(params)
+                params, opt_state = _adam_step(params, grads, opt_state, lr=args.lr)
+                _, imgs, state_end = loss_fn(params)
+
+            position_error = float(jnp.mean((jnp.mean(state_end.q, axis=0) - target_position) ** 2))
+
+            tqdm.write(f"Loss: {float(loss_val):.5}")
+            tqdm.write(f"Position error: {position_error:.5}")
+
+            losses.append(float(loss_val))
+            position_errors.append(position_error)
 
             if args.log:
                 write_imglist_to_gif(
@@ -353,9 +351,7 @@ if __name__ == "__main__":
                 )
                 imageio.imwrite(
                     os.path.join(logdir, f"last_frame_{e:02d}.png"),
-                    (imgs[-1][0].permute(1, 2, 0).detach().cpu().numpy() * 255).astype(
-                        np.uint8
-                    ),
+                    (np.array(imgs[-1][0]).transpose(1, 2, 0) * 255).astype(np.uint8),
                 )
 
     except KeyboardInterrupt:

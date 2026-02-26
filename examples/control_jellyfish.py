@@ -16,16 +16,31 @@ try:
 except ImportError:
     pass
 
+
+def _adam_init(params):
+    return {k: {"m": jnp.zeros_like(v), "v": jnp.zeros_like(v), "t": 0}
+            for k, v in params.items()}
+
+
+def _adam_step(params, grads, state, lr, beta1=0.5, beta2=0.99, eps=1e-8):
+    new_params, new_state = {}, {}
+    for k in params:
+        t = state[k]["t"] + 1
+        m = beta1 * state[k]["m"] + (1 - beta1) * grads[k]
+        v = beta2 * state[k]["v"] + (1 - beta2) * grads[k] ** 2
+        m_hat = m / (1 - beta1 ** t)
+        v_hat = v / (1 - beta2 ** t)
+        new_params[k] = params[k] - lr * m_hat / (jnp.sqrt(v_hat) + eps)
+        new_state[k] = {"m": m, "v": v, "t": t}
+    return new_params, new_state
+
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--inference", action="store_true", help="Only run inference.")
 
     args = parser.parse_args()
-
-    torch.manual_seed(42)
-
-    torch.autograd.set_detect_anomaly(True)
 
     sim_duration = 1  # seconds
     sim_substeps = 16
@@ -34,7 +49,7 @@ if __name__ == "__main__":
     sim_time = 0.0
 
     train_iters = 200
-    train_rate = 0.01  # 1.0/(sim_dt*sim_dt)
+    train_rate = 0.01
 
     phase_count = 8
     phase_step = math.pi / phase_count * 2.0
@@ -94,7 +109,7 @@ if __name__ == "__main__":
     model.tri_drag = 0.0
 
     model.edge_ke = 20.0
-    model.edge_kd = 1.0  # 2.5
+    model.edge_kd = 1.0
 
     model.contact_ke = 1.0e4
     model.contact_kd = 0.0
@@ -103,134 +118,121 @@ if __name__ == "__main__":
 
     model.particle_radius = 0.01
     model.ground = False
-    model.gravity = torch.tensor((0.0, 0.0, 0.0))
+    model.gravity = jnp.array((0.0, 0.0, 0.0))
 
-    # training params
-    target_pos = torch.tensor((4.0, 2.0, 0.0))
-
+    # Store rest angle before training
     rest_angle = model.edge_rest_angle
 
-    # one fully connected layer + tanh activation
-    network = torch.nn.Sequential(
-        torch.nn.Linear(phase_count, model.edge_count, bias=False), torch.nn.Tanh(),
-    )
-    if args.inference:
-        network = torch.load("cache/jellyfish/debug/model.pt")
-        network.eval()
-    else:
-        network.train()
+    # Replace torch.nn.Sequential with weight matrix W
+    # network: Linear(phase_count, edge_count, bias=False) + Tanh
+    # forward: jnp.tanh(phases @ W) * activation_strength * activation_scale
+    params = {"W": jnp.zeros((phase_count, model.edge_count), dtype=jnp.float32)}
+    opt_state = _adam_init(params)
 
     activation_strength = math.pi * 0.3
-    activation_scale = torch.tensor(active_scale)
+    activation_scale = jnp.array(active_scale)
     activation_penalty = 0.0
 
     integrator = df.sim.SemiImplicitIntegrator()
 
     render_time = 0
 
-    # Setup SoftRasterizer
-    device = "cuda:0"
-    renderer = SoftRenderer(camera_mode="look_at", device=device)
+    renderer = SoftRenderer(camera_mode="look_at")
     camera_distance = 10.0
     elevation = 0.0
     azimuth = 0.0
     renderer.set_eye_from_angles(camera_distance, elevation, azimuth)
 
     faces = model.tri_indices
-    textures = torch.cat(
+    textures = jnp.concatenate(
         (
-            torch.zeros(1, faces.shape[-2], 2, 1, dtype=torch.float32, device=device),
-            torch.zeros(1, faces.shape[-2], 2, 1, dtype=torch.float32, device=device),
-            torch.ones(1, faces.shape[-2], 2, 1, dtype=torch.float32, device=device),
+            jnp.zeros((1, faces.shape[-2], 2, 1), dtype=jnp.float32),
+            jnp.zeros((1, faces.shape[-2], 2, 1), dtype=jnp.float32),
+            jnp.ones((1, faces.shape[-2], 2, 1), dtype=jnp.float32),
         ),
-        dim=-1,
+        axis=-1,
     )
-
-    # target_image = imageio.imread("cache/fem/debug/target_img_end.png")
-    # target_image = torch.from_numpy(target_image).float().to(device) / 255.0
-    # target_image = target_image.permute(2, 0, 1).unsqueeze(0)
-
-    optimizer = torch.optim.SGD(network.parameters(), lr=train_rate, momentum=0.5)
-    # optimizer = torch.optim.Adam(network.parameters(), lr=train_rate)
 
     epochs = 100
     validate_every = 10
 
     if args.inference:
-        torch.autograd.set_grad_enabled(False)
         epochs = 1
         sim_duration = 25
         sim_dt = (1.0 / 60.0) / sim_substeps
         sim_steps = int(sim_duration / sim_dt)
 
-    for e in trange(epochs):
+    render_every = 60
+    print_every = 60 * 16
 
-        sim_time = 0.0
-
-        state = model.state()
-
-        loss = torch.zeros(1, requires_grad=True)
-        # loss = None
-
-        print_every = 60 * 16
-        render_every = 60
-
-        imgs = []
+    def loss_fn(params_inner):
+        sim_time_inner = 0.0
+        # Reset rest angle for this forward pass
+        model.edge_rest_angle = rest_angle
+        state_inner = model.state()
+        loss_inner = 0.0
+        imgs_inner = []
 
         for i in range(0, sim_steps):
+            # Build sinusoidal input phases
+            phases = jnp.array([
+                math.sin(phase_freq * (sim_time_inner + p * phase_step))
+                for p in range(phase_count)
+            ], dtype=jnp.float32)
 
-            # build sinusoidal input phases
-            phases = torch.zeros(phase_count)
-            for p in range(phase_count):
-                phases[p] = math.sin(phase_freq * (sim_time + p * phase_step))
-
-            # compute activations (rest angles)
-            activation = (network(phases)) * activation_strength * activation_scale
+            # Compute activations (rest angles)
+            activation = jnp.tanh(phases @ params_inner["W"]) * activation_strength * activation_scale
             model.edge_rest_angle = rest_angle + activation
 
-            state = integrator.forward(model, state, sim_dt)
-            sim_time += sim_dt * sim_substeps
+            state_inner = integrator.forward(model, state_inner, sim_dt)
+            sim_time_inner += sim_dt * sim_substeps
 
-            com_loss = torch.mean(state.u * model.particle_mass[:, None], 0)
-            # com_loss = torch.mean(state.q, 0)
-            act_loss = torch.norm(activation) * activation_penalty
+            com_loss = jnp.mean(state_inner.u * model.particle_mass[:, None], axis=0)
+            act_loss = jnp.linalg.norm(activation) * activation_penalty
 
-            loss = loss - com_loss[1] - act_loss
+            loss_inner = loss_inner - com_loss[1] - act_loss
 
             if i % render_every == 0 or i == sim_steps - 1:
-                with torch.no_grad():
-                    device = "cuda:0"
-                    rgba = renderer.forward(
-                        state.q.unsqueeze(0).to(device),
-                        faces.unsqueeze(0).to(device),
-                        textures.to(device),
-                    )
-                    imgs.append(rgba)
+                rgba = renderer.forward(
+                    state_inner.q[None, :],
+                    faces[None, :],
+                    textures,
+                )
+                imgs_inner.append(rgba)
+
+        return loss_inner, imgs_inner
+
+    grad_fn = jax.value_and_grad(lambda p: loss_fn(p)[0])
+
+    for e in trange(epochs):
 
         if not args.inference:
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
+            loss_val, grads = grad_fn(params)
+            params, opt_state = _adam_step(params, grads, opt_state, lr=train_rate)
+        else:
+            loss_val = 0.0
 
-        tqdm.write(f"Loss: {loss.item():.5}")
+        _, imgs = loss_fn(params)
+
+        tqdm.write(f"Loss: {float(loss_val):.5}")
 
         render_time += 1
         if args.inference:
             filename = os.path.join("cache", "jellyfish", "debug", "inference")
         else:
             filename = os.path.join("cache", "jellyfish", "debug", f"{render_time:02d}")
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
         write_imglist_to_gif(imgs, f"{filename}.gif", imgformat="rgba", verbose=False)
 
         if args.inference:
-            filename = os.path.join("cache", "jellyfish", "debug", "inference")
+            savepath = os.path.join("cache", "jellyfish", "debug", "inference.png")
         else:
-            filename = os.path.join(
-                "cache", "jellyfish", "debug", f"last_frame_{render_time:02d}"
+            savepath = os.path.join(
+                "cache", "jellyfish", "debug", f"last_frame_{render_time:02d}.png"
             )
         imageio.imwrite(
-            f"{filename}.png",
-            (imgs[-1][0].permute(1, 2, 0).detach().cpu().numpy() * 255).astype(
-                np.uint8
-            ),
+            savepath,
+            (np.array(imgs[-1][0]).transpose(1, 2, 0) * 255).astype(np.uint8),
         )
-        torch.save(network, "cache/jellyfish/debug/model.pt")
+        # Save weights as numpy array (replaces torch.save)
+        np.save("cache/jellyfish/debug/model_W.npy", np.array(params["W"]))
