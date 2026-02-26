@@ -9,11 +9,9 @@ import json
 import os
 import time
 
-# import imageio
 import numpy as np
-import torch
-from torch.utils.data import DataLoader
-# from tqdm import tqdm, trange
+import jax
+import jax.numpy as jnp
 
 from gradsim.assets.primitives import INT_TO_PRIMITIVE, get_primitive_obj
 from gradsim.bodies import RigidBody
@@ -22,34 +20,24 @@ from gradsim.renderutils import SoftRenderer, TriangleMesh
 from gradsim.simulator import Simulator
 from gradsim.utils import meshutils
 from gradsim.utils.h5 import HDF5Dataset
-# from gradsim.utils.logging import write_imglist_to_gif
 
 
-class MassModel(torch.nn.Module):
-    """Wrap masses into a torch.nn.Module, for ease of optimization. """
+def _adam_init(params):
+    return {k: {"m": jnp.zeros_like(v), "v": jnp.zeros_like(v), "t": 0}
+            for k, v in params.items()}
 
-    def __init__(
-        self, masses, uniform_density=False, minmass=0.1, maxmass=10.0, verbose=False
-    ):
-        super(MassModel, self).__init__()
-        self.update = None
-        self.masses = masses
-        self.minmass = minmass
-        self.maxmass = maxmass
-        if uniform_density:
-            if verbose:
-                print("Using uniform density assumption...")
-            # self.update = torch.nn.Parameter(torch.rand(1) * (minmass - maxmass) + maxmass)
-            self.update = torch.nn.Parameter(torch.rand(1) * 0.1)
-        else:
-            if verbose:
-                print("Assuming nonuniform density...")
-            # self.update = torch.nn.Parameter(torch.rand(masses.shape) * (minmass - maxmass) + maxmass)
-            self.update = torch.nn.Parameter(torch.rand(masses.shape) * 0.1)
 
-    def forward(self):
-        # return (self.update.repeat(self.masses.shape[0])).clamp(min=self.minmass, max=self.maxmass)
-        return self.masses + self.update
+def _adam_step(params, grads, state, lr, beta1=0.5, beta2=0.99, eps=1e-8):
+    new_params, new_state = {}, {}
+    for k in params:
+        t = state[k]["t"] + 1
+        m = beta1 * state[k]["m"] + (1 - beta1) * grads[k]
+        v = beta2 * state[k]["v"] + (1 - beta2) * grads[k] ** 2
+        m_hat = m / (1 - beta1 ** t)
+        v_hat = v / (1 - beta2 ** t)
+        new_params[k] = params[k] - lr * m_hat / (jnp.sqrt(v_hat) + eps)
+        new_state[k] = {"m": m, "v": v, "t": t}
+    return new_params, new_state
 
 
 if __name__ == "__main__":
@@ -90,10 +78,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    device = "cuda:0"
-
-    torch.manual_seed(42)
-
     logdir = os.path.join(args.logdir, args.expid)
     if args.log:
         os.makedirs(logdir, exist_ok=True)
@@ -103,13 +87,9 @@ if __name__ == "__main__":
     true_masses = []
     predicted_masses = []
 
-    # Load 10 samples of only sequences
     dataset = HDF5Dataset(args.datadir, read_only_seqs=False)
-    dataloader = DataLoader(
-        dataset, batch_size=1, shuffle=False, collate_fn=dataset.HDF5_collate_fn
-    )
 
-    for idx, out in enumerate(dataloader):
+    for idx, out in enumerate(dataset):
 
         starttime = time.time()
 
@@ -118,8 +98,6 @@ if __name__ == "__main__":
         # First 800 images are used for training other baselines.
         if idx < 800:
             continue
-
-        out = next(iter(dataloader))
 
         (
             seqs,
@@ -138,191 +116,118 @@ if __name__ == "__main__":
             angular_velocity,
         ) = out
 
-        # # Run the simulation.
-        # imgs_gt = []
-        # # writer = imageio.get_writer("cache/a.gif", mode="I")
-        # for i in trange(60):
-        #     img = seqs[0, i]
-        #     # writer.append_data(img.astype(np.uint8))
-        #     imgs_gt.append(img.astype(np.uint8))
-        # # writer.close()
-
-        # Initialize the renderer
         image_size = 256
         camera_mode = "look_at"
         camera_distance = 8.0
         elevation = 30.0
         azimuth = 0.0
-        # Initialize the renderer.
-        renderer = SoftRenderer(
-            image_size=image_size, camera_mode=camera_mode, device=device
-        )
+        renderer = SoftRenderer(image_size=image_size, camera_mode=camera_mode)
         renderer.set_eye_from_angles(camera_distance, elevation, azimuth)
 
-        sim_duration = 2.0  # seconds
-        fps = 30  # frames per second
+        sim_duration = 2.0
+        fps = 30
         sim_steps = int((sim_duration * fps) / 2)
 
-        # obj = get_primitive_obj(shape[0])
         obj = get_primitive_obj(INT_TO_PRIMITIVE[shape[0]])
-        # print(obj)
         mesh = TriangleMesh.from_obj(obj)
-        vertices = (
+        vertices = meshutils.normalize_vertices(mesh.vertices)[None, :]
+        faces = mesh.faces[None, :]
+        textures = jnp.concatenate(
             (
-                meshutils.normalize_vertices(mesh.vertices)  # + \
-                # torch.from_numpy(init_pos[i]).float().unsqueeze(0)
-            )
-            .to(device)
-            .unsqueeze(0)
-        )
-        faces = mesh.faces.unsqueeze(0).to(device)
-        textures = torch.cat(
-            (
-                color[0][0]
-                / 255.0
-                * torch.ones(
-                    1, faces.shape[1], 2, 1, dtype=torch.float32, device=device
-                ),
-                color[0][1]
-                / 255.0
-                * torch.ones(
-                    1, faces.shape[1], 2, 1, dtype=torch.float32, device=device
-                ),
-                color[0][2]
-                / 255.0
-                * torch.ones(
-                    1, faces.shape[1], 2, 1, dtype=torch.float32, device=device
-                ),
+                color[0][0] / 255.0 * jnp.ones((1, faces.shape[1], 2, 1), dtype=jnp.float32),
+                color[0][1] / 255.0 * jnp.ones((1, faces.shape[1], 2, 1), dtype=jnp.float32),
+                color[0][2] / 255.0 * jnp.ones((1, faces.shape[1], 2, 1), dtype=jnp.float32),
             ),
-            dim=-1,
+            axis=-1,
         )
 
-        # print("GT mass:", mass[0], mass[0] * vertices.shape[-2])
         true_masses.append(mass[0])
 
-        # (Uniform) Masses
-        masses_gt = (float(mass[0])) * torch.nn.Parameter(
-            torch.ones(vertices.shape[-2], dtype=vertices.dtype, device=device),
-            requires_grad=True,
-        )
-        # Body
+        masses_gt = float(mass[0]) * jnp.ones(vertices.shape[-2], dtype=jnp.float32)
         body_gt = RigidBody(
             vertices[0],
             masses=masses_gt,
-            # position=torch.from_numpy(init_pos[i]).float().to(device),
-            orientation=torch.from_numpy(orientation[0]).float().to(device),
+            orientation=jnp.array(orientation[0], dtype=jnp.float32),
             friction_coefficient=float(fric[0]),
             restitution=float(elas[0]),
-            # linear_velocity=torch.tensor(linear_velocity[i], device=device),
-            # angular_velocity=torch.tensor(angular_velocity[i], device=device),
         )
 
-        # inds = body_gt.vertices.argmin(1)
-        # application_points = list(inds.view(-1).detach().cpu().numpy())
-        # print("Est app points:", application_points)
         application_points = [force_application_points[0]]
-        # print("True app points:", application_points)
-        # Add a force
         force = ConstantForce(
             magnitude=force_magnitude[0],
-            direction=torch.from_numpy(force_direction[0]).float().to(device),
+            direction=jnp.array(force_direction[0], dtype=jnp.float32),
             starttime=0.0,
             endtime=0.1,
-            device=device,
         )
         body_gt.add_external_force(force, application_points=application_points)
 
-        # Add gravity
         gravity = ConstantForce(
-            magnitude=10.0, direction=torch.tensor([0, -1, 0]), device=device,
+            magnitude=10.0, direction=jnp.array([0, -1, 0], dtype=jnp.float32),
         )
         body_gt.add_external_force(gravity)
 
         sim_gt = Simulator([body_gt])
 
-        # 2 seconds; 30 fps
         imgs_gt = []
-        with torch.no_grad():
-            for t in range(sim_steps):
-                sim_gt.step()
-                rgba = renderer.forward(
-                    body_gt.get_world_vertices().unsqueeze(0), faces, textures
-                )
-                imgs_gt.append(rgba)
+        for t in range(sim_steps):
+            sim_gt.step()
+            rgba = renderer.forward(
+                body_gt.get_world_vertices()[None, :], faces, textures
+            )
+            imgs_gt.append(rgba)
 
-        masses_est = torch.nn.Parameter(
-            (0.2) * torch.ones_like(masses_gt), requires_grad=True,
-        )
-        massmodel = MassModel(
-            masses_est, uniform_density=True, minmass=1e-9, maxmass=1e9,
-        )
-        massmodel.to(device)
+        masses_est_init = 0.2 * jnp.ones(vertices.shape[-2], dtype=jnp.float32)
+        params = {"update": jnp.zeros(1, dtype=jnp.float32)}  # uniform density
+        opt_state = _adam_init(params)
 
-        # optimizer = torch.optim.Adam(massmodel.parameters(), lr=1)
-        optimizer = torch.optim.SGD(massmodel.parameters(), lr=1e-1)
-        lossfn = torch.nn.MSELoss()
-
-        imgs_est = (
-            None  # Create a placeholder here, for global scope (useful in logging)
-        )
         losses = []
         est_masses = None
-        initial_imgs = []
-        initial_masses = None
-        for i in range(args.optiters):
-            masses_cur = massmodel()
-            # print(masses_cur.mean())
+
+        def loss_fn(params_inner):
+            masses_cur = jnp.maximum(masses_est_init + params_inner["update"][0], 0.0) * jnp.ones(
+                vertices.shape[-2], dtype=jnp.float32
+            )
             body = RigidBody(
                 vertices=vertices[0],
                 masses=masses_cur,
-                orientation=torch.from_numpy(orientation[0]).float().to(device),
+                orientation=jnp.array(orientation[0], dtype=jnp.float32),
                 friction_coefficient=float(fric[0]),
                 restitution=float(elas[0]),
             )
             body.add_external_force(force, application_points=application_points)
             body.add_external_force(gravity)
             sim_est = Simulator([body])
-            imgs_est = []
+            imgs_est_inner = []
             for t in range(sim_steps):
                 sim_est.step()
                 rgba = renderer.forward(
-                    body.get_world_vertices().unsqueeze(0), faces, textures
+                    body.get_world_vertices()[None, :], faces, textures
                 )
-                imgs_est.append(rgba)
-                if i == 0:
-                    initial_imgs.append(rgba)  # To log initial guess.
-            loss = sum(
-                [
-                    lossfn(est, gt)
-                    for est, gt in zip(
-                        imgs_est[:: args.compare_every], imgs_gt[:: args.compare_every]
-                    )
-                ]
-            ) / (len(imgs_est[:: args.compare_every]))
-            # if i % 5 == 0:
-            #     tqdm.write(
-            #         f"Loss: {loss.item():.5f}, "
-            #         f"Mass (err): {(masses_cur - masses_gt).abs().mean():.5f}, "
-            #         f"pred: {masses_cur.mean().item():.5f}"
-            #     )
-            #     # write_imglist_to_gif(
-            #     #     imgs_est, "cache/exp01/est.gif", imgformat="rgba",
-            #     # )
-            # # tqdm.write(f"Mass (GT): {masses_gt.mean():.5f}")
-            losses.append(loss.item())
-            est_masses = masses_cur.clone().detach().cpu().numpy()
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-            if i == 40 or i == 80:
-                for param_group in optimizer.param_groups:
-                    param_group["lr"] = param_group["lr"] * 0.5
+                imgs_est_inner.append(rgba)
+            return sum(
+                jnp.mean((est - gt) ** 2)
+                for est, gt in zip(
+                    imgs_est_inner[:: args.compare_every], imgs_gt[:: args.compare_every]
+                )
+            ) / len(imgs_est_inner[:: args.compare_every])
 
-            # write_imglist_to_gif(
-            #     imgs_est, "cache/exp01/est.gif", imgformat="rgba",
-            # )
+        grad_fn = jax.value_and_grad(loss_fn)
 
-        predicted_masses.append(est_masses.mean().item())
+        for i in range(args.optiters):
+            loss_val, grads = grad_fn(params)
+            lr = 1e-1
+            if i >= 80:
+                lr *= 0.25
+            elif i >= 40:
+                lr *= 0.5
+            params, opt_state = _adam_step(params, grads, opt_state, lr=lr)
+            losses.append(float(loss_val))
+            est_masses = np.array(
+                jnp.maximum(masses_est_init + params["update"][0], 0.0)
+                * jnp.ones(vertices.shape[-2], dtype=jnp.float32)
+            )
+
+        predicted_masses.append(float(est_masses.mean()))
 
         print(f"Optimization time: {time.time() - starttime}")
 
@@ -332,32 +237,3 @@ if __name__ == "__main__":
     if args.log:
         np.savetxt(os.path.join(logdir, "true_masses.txt"), true_masses)
         np.savetxt(os.path.join(logdir, "predicted_masses.txt"), predicted_masses)
-
-    # # Sanity check, to ensure image rendering pipeline is sane
-
-    # write_imglist_to_gif(
-    #     imgs, "cache/regenerated.gif", imgformat="rgba", verbose=False
-    # )
-
-    # errors = []
-    # errorsum = 0.
-    # errcount = 0
-    # for gt, pred in zip(imgs_gt, imgs):
-    #     gt = torch.from_numpy(gt).float().to(device) / 255
-    #     pred = ((pred[0].permute(1, 2, 0)) * 255)
-    #     gt = gt.long()
-    #     pred = pred.long()
-    #     err = torch.nn.functional.mse_loss(pred[..., :3].float(), gt[..., :3].float())
-    #     errors.append(err.item())
-    #     errorsum += err.item()
-    #     errcount += 1
-    # print(errorsum / errcount)
-
-    # # Run the simulation.
-    # imgs_gt = []
-    # # writer = imageio.get_writer("cache/a.gif", mode="I")
-    # for i in trange(60):
-    #     img = seqs[0, i]
-    #     # writer.append_data(img.astype(np.uint8))
-    #     imgs_gt.append(img.astype(np.uint8))
-    # # writer.close()

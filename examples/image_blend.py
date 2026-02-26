@@ -5,7 +5,10 @@ import glob
 import imageio
 import numpy as np
 import os
-import vapeplot
+try:
+    import vapeplot
+except ImportError:
+    vapeplot = None
 
 from PIL import Image
 from scipy.interpolate import interp1d

@@ -5,14 +5,36 @@ import os
 
 import imageio
 import numpy as np
-import torch
+import jax
+import jax.numpy as jnp
 from tqdm import tqdm, trange
 
 from argparsers import get_dflex_base_parser
 from gradsim import dflex as df
 from gradsim.renderutils import SoftRenderer
 from gradsim.utils.logging import write_imglist_to_dir, write_imglist_to_gif
-from pxr import Usd, UsdGeom
+try:
+    from pxr import Usd, UsdGeom
+except ImportError:
+    pass
+
+
+def _adam_init(params):
+    return {k: {"m": jnp.zeros_like(v), "v": jnp.zeros_like(v), "t": 0}
+            for k, v in params.items()}
+
+
+def _adam_step(params, grads, state, lr, beta1=0.5, beta2=0.99, eps=1e-8):
+    new_params, new_state = {}, {}
+    for k in params:
+        t = state[k]["t"] + 1
+        m = beta1 * state[k]["m"] + (1 - beta1) * grads[k]
+        v = beta2 * state[k]["v"] + (1 - beta2) * grads[k] ** 2
+        m_hat = m / (1 - beta1 ** t)
+        v_hat = v / (1 - beta2 ** t)
+        new_params[k] = params[k] - lr * m_hat / (jnp.sqrt(v_hat) + eps)
+        new_state[k] = {"m": m, "v": v, "t": t}
+    return new_params, new_state
 
 
 def write_meshes_to_file(vertices_across_time, faces, dirname):
@@ -24,9 +46,7 @@ def write_meshes_to_file(vertices_across_time, faces, dirname):
 
 if __name__ == "__main__":
 
-    # Get an argument parser with base-level arguments already filled in.
     dflex_base_parser = get_dflex_base_parser()
-    # Create a new parser that inherits these arguments.
     parser = argparse.ArgumentParser(
         parents=[dflex_base_parser], conflict_handler="resolve"
     )
@@ -89,10 +109,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(args)
 
-    torch.manual_seed(args.seed)
-
-    torch.autograd.set_detect_anomaly(True)
-
     logdir = os.path.join(args.logdir, args.expid)
     if args.log:
         os.makedirs(logdir, exist_ok=True)
@@ -103,13 +119,7 @@ if __name__ == "__main__":
     sim_steps = int(args.sim_duration / sim_dt)
     sim_time = 0.0
 
-    # sim_duration = 5.0  # seconds
-    # sim_substeps = 32
-    # sim_dt = (1.0 / 60.0) / sim_substeps
-    # sim_steps = int(sim_duration / sim_dt)
-    # sim_time = 0.0
-
-    train_rate = 0.001  # 0.0001
+    train_rate = 0.001
 
     phase_count = 4
 
@@ -132,18 +142,12 @@ if __name__ == "__main__":
         builder.add_triangle(i, j, k)
 
     model = builder.finalize("cpu")
-    # model.tri_lambda = 10000.0
-    # model.tri_ka = 10000.0
-    # model.tri_kd = 100.0
 
     model.tri_ke = 10000.0
     model.tri_ka = 10000.0
     model.tri_kd = 100.0
     model.tri_lift = 0.0
     model.tri_drag = 0.0
-
-    edge_ke = 0.0
-    edge_kd = 0.0
 
     model.contact_ke = 1.0e4
     model.contact_kd = 1000.0
@@ -152,119 +156,98 @@ if __name__ == "__main__":
 
     model.particle_radius = 0.01
 
-    # one fully connected layer + tanh activation
-    network = torch.nn.Sequential(
-        torch.nn.Linear(phase_count, model.tri_count, bias=False), torch.nn.Tanh()
-    )
+    # Replace torch.nn.Sequential with weight matrix W
+    params = {"W": jnp.zeros((phase_count, model.tri_count), dtype=jnp.float32)}
+    opt_state = _adam_init(params)
 
     activation_strength = 0.2
     activation_penalty = 0.1
 
     integrator = df.sim.SemiImplicitIntegrator()
 
-    # Setup SoftRasterizer
-    device = "cuda:0"
-    renderer = SoftRenderer(camera_mode="look_at", device=device)
+    renderer = SoftRenderer(camera_mode="look_at")
     camera_distance = 8.0
     elevation = 30.0
     azimuth = 0.0
     renderer.set_eye_from_angles(camera_distance, elevation, azimuth)
 
     faces = model.tri_indices
-    textures = torch.cat(
+    textures = jnp.concatenate(
         (
-            torch.zeros(1, faces.shape[-2], 2, 1, dtype=torch.float32, device=device),
-            torch.ones(1, faces.shape[-2], 2, 1, dtype=torch.float32, device=device),
-            torch.zeros(1, faces.shape[-2], 2, 1, dtype=torch.float32, device=device),
+            jnp.zeros((1, faces.shape[-2], 2, 1), dtype=jnp.float32),
+            jnp.ones((1, faces.shape[-2], 2, 1), dtype=jnp.float32),
+            jnp.zeros((1, faces.shape[-2], 2, 1), dtype=jnp.float32),
         ),
-        dim=-1,
+        axis=-1,
     )
 
     target_image = imageio.imread(os.path.join("sampledata", "target_img_walker.png"))
-    target_image = torch.from_numpy(target_image).float().to(device) / 255.0
-    target_image = target_image.permute(2, 0, 1).unsqueeze(0)
+    target_image = (jnp.array(target_image, dtype=jnp.float32) / 255.0).transpose(2, 0, 1)[None, :]
 
-    # optimizer = torch.optim.SGD(network.parameters(), lr=train_rate, momentum=0.25)
-    # TODO: Tune the learning rate (the current one is likely too low)
-    optimizer = torch.optim.Adam(network.parameters(), lr=args.lr)
-
-    # epochs = 40
     render_every = 60 * 4
 
     losses = []
     position_xs = []
 
-    for e in trange(args.epochs):
-
-        sim_time = 0.0
-
-        state = model.state()
-
-        loss = torch.zeros(1, requires_grad=True)
-
-        imgs = []
-        vertices = []
+    def loss_fn(params_inner):
+        sim_time_inner = 0.0
+        state_inner = model.state()
+        loss_inner = 0.0
+        imgs_inner = []
+        vertices_inner = []
 
         for i in range(0, sim_steps):
+            # Build sinusoidal phase inputs
+            phases = jnp.array([
+                math.sin(20.0 * (sim_time_inner + 0.5 * p * math.pi))
+                for p in range(phase_count)
+            ], dtype=jnp.float32)
 
-            # build sinusoidal phase inputs
-            phases = torch.zeros(phase_count)
-            for p in range(phase_count):
-                phases[p] = math.sin(20.0 * (sim_time + 0.5 * p * math.pi))
+            model.tri_activations = jnp.tanh(phases @ params_inner["W"]) * activation_strength
+            state_inner = integrator.forward(model, state_inner, sim_dt)
 
-            model.tri_activations = network(phases) * activation_strength
-            state = integrator.forward(model, state, sim_dt)
+            sim_time_inner += sim_dt
 
-            sim_time += sim_dt
-
-            # if (render and (i%sim_substeps == 0)):
-            #     render_time += sim_dt*sim_substeps
-            # renderer.update(state, render_time)
             if i % render_every == 0 or i == sim_steps - 1:
-                # with torch.no_grad():
-                device = "cuda:0"
                 rgba = renderer.forward(
-                    state.q.unsqueeze(0).to(device),
-                    faces.unsqueeze(0).to(device),
-                    textures.to(device),
+                    state_inner.q[None, :],
+                    faces[None, :],
+                    textures,
                 )
-                imgs.append(rgba)
-                vertices.append(state.q.detach().cpu().numpy())
+                imgs_inner.append(rgba)
+                vertices_inner.append(np.array(state_inner.q))
 
-            com_pos = torch.mean(state.q, 0)
-            com_vel = torch.mean(state.u, 0)
-
-            """
-            TODO: Apart from the model.tri_activation variable, no other
-            term (not even state.q.mean(0) or state.com.mean(0)) seems to
-            affect the loss function. Look into this.
-            """
+            com_vel = jnp.mean(state_inner.u, axis=0)
 
             if args.method == "physics-only":
-                # use integral of velocity over course of the run
-                loss = (
-                    loss
+                loss_inner = (
+                    loss_inner
                     - com_vel[0]
-                    + torch.norm(model.tri_activations) * activation_penalty
+                    + jnp.linalg.norm(model.tri_activations) * activation_penalty
                 )
 
         if args.method == "gradsim":
-            loss = torch.nn.functional.mse_loss(imgs[-1], target_image)
-        tqdm.write(f"Loss: {loss.item():.5}")
+            loss_inner = jnp.mean((imgs_inner[-1] - target_image) ** 2)
 
-        # com_pos = state.q.mean(0)
-        # com_pos_err = (com_pos - torch.tensor([4.0, 0.0, 0.0])) ** 2
-        # loss = loss - state.u.mean(0)[0]
+        return loss_inner, imgs_inner, vertices_inner, state_inner
 
-        losses.append(loss.item())
-        position_xs.append(state.q.mean(0)[0].item())
+    grad_fn = jax.value_and_grad(lambda p: loss_fn(p)[0])
+
+    for e in trange(args.epochs):
 
         if args.method != "random":
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
+            loss_val, grads = grad_fn(params)
+            params, opt_state = _adam_step(params, grads, opt_state, lr=args.lr)
+        else:
+            loss_val = 0.0
 
-        tqdm.write(f"Iter: {e:03d}, Loss: {loss.item():.5}")
+        _, imgs, vertices, state_end = loss_fn(params)
+
+        tqdm.write(f"Loss: {float(loss_val):.5}")
+        tqdm.write(f"Iter: {e:03d}, Loss: {float(loss_val):.5}")
+
+        losses.append(float(loss_val))
+        position_xs.append(float(state_end.q.mean(axis=0)[0]))
 
         if args.log:
             write_imglist_to_gif(
@@ -278,7 +261,7 @@ if __name__ == "__main__":
             )
             write_meshes_to_file(
                 vertices,
-                faces.detach().cpu().numpy(),
+                np.array(faces),
                 os.path.join(logdir, f"vertices_{e:05d}")
             )
 

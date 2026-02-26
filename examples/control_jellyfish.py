@@ -4,13 +4,17 @@ import os
 
 import imageio
 import numpy as np
-import torch
+import jax
+import jax.numpy as jnp
 from tqdm import tqdm, trange
 
 from gradsim import dflex as df
 from gradsim.renderutils import SoftRenderer
 from gradsim.utils.logging import write_imglist_to_gif
-from pxr import Usd, UsdGeom
+try:
+    from pxr import Usd, UsdGeom
+except ImportError:
+    pass
 
 if __name__ == "__main__":
 

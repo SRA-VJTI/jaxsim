@@ -5,7 +5,8 @@ import os
 
 import imageio
 import numpy as np
-import torch
+import jax
+import jax.numpy as jnp
 from tqdm import tqdm, trange
 
 import kaolin as kal
@@ -14,7 +15,10 @@ from argparsers import get_dflex_base_parser
 from gradsim import dflex as df
 from gradsim.renderutils import SoftRenderer
 from gradsim.utils.logging import write_imglist_to_dir, write_imglist_to_gif
-from pxr import Usd, UsdGeom
+try:
+    from pxr import Usd, UsdGeom
+except ImportError:
+    pass
 
 
 def write_meshes_to_file(vertices_across_time, faces, dirname):

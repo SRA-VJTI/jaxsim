@@ -4,13 +4,32 @@ import math
 import os
 
 import numpy as np
-import torch
+import jax
+import jax.numpy as jnp
 from tqdm import trange
 
 from argparsers import get_dflex_base_parser
 from gradsim import dflex as df
 from gradsim.renderutils import SoftRenderer
 from gradsim.utils.logging import write_imglist_to_dir, write_imglist_to_gif
+
+
+def _adam_init(params):
+    return {k: {"m": jnp.zeros_like(v), "v": jnp.zeros_like(v), "t": 0}
+            for k, v in params.items()}
+
+
+def _adam_step(params, grads, state, lr, beta1=0.5, beta2=0.99, eps=1e-8):
+    new_params, new_state = {}, {}
+    for k in params:
+        t = state[k]["t"] + 1
+        m = beta1 * state[k]["m"] + (1 - beta1) * grads[k]
+        v = beta2 * state[k]["v"] + (1 - beta2) * grads[k] ** 2
+        m_hat = m / (1 - beta1 ** t)
+        v_hat = v / (1 - beta2 ** t)
+        new_params[k] = params[k] - lr * m_hat / (jnp.sqrt(v_hat) + eps)
+        new_state[k] = {"m": m, "v": v, "t": t}
+    return new_params, new_state
 
 
 def read_tet_mesh(filepath):
@@ -25,35 +44,15 @@ def read_tet_mesh(filepath):
                 vertices.append([float(d) for d in data[1:]])
             elif data[0] == "t":
                 faces.append([int(d) for d in data[1:]])
-    # vertices = torch.tensor([float(el) for sublist in vertices for el in sublist]).view(-1, 3)
-    # faces = torch.tensor(faces, dtype=torch.long)
-    vertices = [tuple(v) for v in vertices]  # Does not seem to work
+    vertices = [tuple(v) for v in vertices]
     vertices = np.asarray(vertices).astype(np.float32)
     faces = [f for face in faces for f in face]
     return vertices, faces
 
 
-class SimpleModel(torch.nn.Module):
-    """A thin wrapper around a parameter, for convenient use with optim. """
-
-    def __init__(self, param, activation=None):
-        super(SimpleModel, self).__init__()
-        self.update = torch.nn.Parameter(torch.rand(param.shape) * 0.1)
-        self.param = param
-        self.activation = activation
-
-    def forward(self):
-        out = self.param + self.update
-        if self.activation is not None:
-            return self.activation(out) + 1e-8
-        return out
-
-
 if __name__ == "__main__":
 
-    # Get an argument parser with base-level arguments already filled in.
     dflex_base_parser = get_dflex_base_parser()
-    # Create a new parser that inherits these arguments.
     parser = argparse.ArgumentParser(
         parents=[dflex_base_parser], conflict_handler="resolve"
     )
@@ -116,12 +115,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(args)
 
-    torch.manual_seed(args.seed)
-
-    torch.autograd.set_detect_anomaly(True)
-
-    device = "cuda:0"
-
     logdir = os.path.join(args.logdir, args.expid)
     if args.log:
         os.makedirs(logdir, exist_ok=True)
@@ -132,7 +125,7 @@ if __name__ == "__main__":
     sim_steps = int(args.sim_duration / sim_dt)
     sim_time = 0.0
 
-    renderer = SoftRenderer(camera_mode="look_at", device=device)
+    renderer = SoftRenderer(camera_mode="look_at")
     camera_distance = 8.0
     elevation = 30.0
     azimuth = 0.0
@@ -140,314 +133,268 @@ if __name__ == "__main__":
 
     render_steps = args.sim_substeps
 
-    phase_count = 8
-    phase_step = math.pi / phase_count * 2.0
-    phase_freq = 2.5
-
-    # points, tet_indices = read_tet_mesh("cache/tetassets/icosphere.tet")
     points, tet_indices = read_tet_mesh(args.mesh)
-    # print(points)
-    # print(tet_indices)
 
     r = df.quat_multiply(
         df.quat_from_axis_angle((0.0, 0.0, 1.0), math.pi * 0.0),
         df.quat_from_axis_angle((1.0, 0.0, 0.0), math.pi * 0.0),
     )
 
-    vx_init = (1.0 - 3.0) * torch.rand(1) + 3.0
-    # pos = torch.tensor([0.0, 2.0, 0.0])
-    # vel = torch.tensor([1.5, 0.0, 0.0])
+    # Use a deterministic initial x-velocity
+    vx_init = 2.0
 
     imgs_gt = []
-
     particle_inv_mass_gt = None
 
-    with torch.no_grad():
-        builder_gt = df.sim.ModelBuilder()
-        builder_gt.add_soft_mesh(
+    builder_gt = df.sim.ModelBuilder()
+    builder_gt.add_soft_mesh(
+        pos=(-2.0, 2.0, 0.0),
+        rot=r,
+        scale=1.0,
+        vel=(vx_init, 0.0, 0.0),
+        vertices=points,
+        indices=tet_indices,
+        density=10.0,
+    )
+
+    model_gt = builder_gt.finalize("cpu")
+
+    model_gt.tet_kl = 1000.0
+    model_gt.tet_km = 1000.0
+    model_gt.tet_kd = 1.0
+
+    model_gt.tri_ke = 0.0
+    model_gt.tri_ka = 0.0
+    model_gt.tri_kd = 0.0
+    model_gt.tri_kb = 0.0
+
+    model_gt.contact_ke = 1.0e4
+    model_gt.contact_kd = 1.0
+    model_gt.contact_kf = 10.0
+    model_gt.contact_mu = 0.5
+
+    model_gt.particle_radius = 0.05
+    model_gt.ground = True
+
+    particle_inv_mass_gt = model_gt.particle_inv_mass
+
+    integrator = df.sim.SemiImplicitIntegrator()
+
+    state_gt = model_gt.state()
+
+    faces = model_gt.tri_indices
+    textures = jnp.concatenate(
+        (
+            jnp.ones((1, faces.shape[-2], 2, 1), dtype=jnp.float32),
+            jnp.ones((1, faces.shape[-2], 2, 1), dtype=jnp.float32),
+            jnp.zeros((1, faces.shape[-2], 2, 1), dtype=jnp.float32),
+        ),
+        axis=-1,
+    )
+
+    imgs_gt = []
+    positions_gt = []
+    for i in trange(0, sim_steps):
+        state_gt = integrator.forward(model_gt, state_gt, sim_dt)
+        sim_time += sim_dt
+
+        if i % render_steps == 0:
+            rgba = renderer.forward(
+                state_gt.q[None, :],
+                faces[None, :],
+                textures,
+            )
+            imgs_gt.append(rgba)
+            positions_gt.append(state_gt.q)
+
+    if args.log:
+        write_imglist_to_gif(
+            imgs_gt,
+            os.path.join(logdir, "gt.gif"),
+            imgformat="rgba",
+            verbose=False,
+        )
+        write_imglist_to_dir(
+            imgs_gt, os.path.join(logdir, "gt"), imgformat="rgba",
+        )
+        np.savetxt(
+            os.path.join(logdir, "mass_gt.txt"),
+            np.array(particle_inv_mass_gt),
+        )
+        np.savetxt(
+            os.path.join(logdir, "vertices.txt"),
+            np.array(state_gt.q)
+        )
+        np.savetxt(
+            os.path.join(logdir, "face.txt"),
+            np.array(faces)
+        )
+
+    # Use deterministic initialization (instead of torch.rand_like)
+    inv_mass_init = jnp.maximum(
+        particle_inv_mass_gt + 0.1 * jnp.ones_like(particle_inv_mass_gt), 0.0
+    )
+    params = {"update": jnp.zeros_like(inv_mass_init)}
+    opt_state = _adam_init(params)
+
+    save_gif_every = 1
+
+    losses = []
+    inv_mass_errors = []
+    mass_errors = []
+
+    def loss_fn(params_inner):
+        inv_mass_cur = jnp.maximum(inv_mass_init + params_inner["update"], 0.0)
+
+        builder = df.sim.ModelBuilder()
+        builder.add_soft_mesh(
             pos=(-2.0, 2.0, 0.0),
             rot=r,
             scale=1.0,
-            vel=(vx_init.item(), 0.0, 0.0),
+            vel=(vx_init, 0.0, 0.0),
             vertices=points,
             indices=tet_indices,
             density=10.0,
         )
 
-        model_gt = builder_gt.finalize("cpu")
+        model = builder.finalize("cpu")
 
-        model_gt.tet_kl = 1000.0
-        model_gt.tet_km = 1000.0
-        model_gt.tet_kd = 1.0
+        model.tet_kl = 1000.0
+        model.tet_km = 1000.0
+        model.tet_kd = 1.0
 
-        model_gt.tri_ke = 0.0
-        model_gt.tri_ka = 0.0
-        model_gt.tri_kd = 0.0
-        model_gt.tri_kb = 0.0
+        model.tri_ke = 0.0
+        model.tri_ka = 0.0
+        model.tri_kd = 0.0
+        model.tri_kb = 0.0
 
-        model_gt.contact_ke = 1.0e4
-        model_gt.contact_kd = 1.0
-        model_gt.contact_kf = 10.0
-        model_gt.contact_mu = 0.5
+        model.contact_ke = 1.0e4
+        model.contact_kd = 1.0
+        model.contact_kf = 10.0
+        model.contact_mu = 0.5
 
-        model_gt.particle_radius = 0.05
-        model_gt.ground = True
-        # model_gt.gravity = torch.tensor((0.0, 0.0, 0.0), dtype=torch.float32, requires_grad=False)
+        model.particle_radius = 0.05
+        model.ground = True
+        model.particle_inv_mass = inv_mass_cur
 
-        particle_inv_mass_gt = model_gt.particle_inv_mass.clone()
-
-        rest_angle = model_gt.edge_rest_angle
-
-        # one fully connected layer + tanh activation
-        network = torch.nn.Sequential(
-            torch.nn.Linear(phase_count, model_gt.tet_count, bias=False),
-            torch.nn.Tanh(),
-        )
-
-        activation_strength = 0.3
-        activation_penalty = 0.0
-
-        integrator = df.sim.SemiImplicitIntegrator()
-
-        sim_time = 0.0
-
-        state_gt = model_gt.state()
-        # loss = torch.zeros(1, requires_grad=True)
-
-        faces = model_gt.tri_indices
-        textures = torch.cat(
+        integrator2 = df.sim.SemiImplicitIntegrator()
+        state2 = model.state()
+        faces2 = model.tri_indices
+        textures2 = jnp.concatenate(
             (
-                torch.ones(
-                    1, faces.shape[-2], 2, 1, dtype=torch.float32, device=device
-                ),
-                torch.ones(
-                    1, faces.shape[-2], 2, 1, dtype=torch.float32, device=device
-                ),
-                torch.zeros(
-                    1, faces.shape[-2], 2, 1, dtype=torch.float32, device=device
-                ),
+                jnp.ones((1, faces2.shape[-2], 2, 1), dtype=jnp.float32),
+                jnp.ones((1, faces2.shape[-2], 2, 1), dtype=jnp.float32),
+                jnp.zeros((1, faces2.shape[-2], 2, 1), dtype=jnp.float32),
             ),
-            dim=-1,
+            axis=-1,
         )
 
-        # states_gt = []
-        imgs_gt = []
-        positions_gt = []
-        for i in trange(0, sim_steps):
-            # phases = torch.zeros(phase_count)
-            # for p in range(phase_count):
-            #     phases[p] = math.sin(phase_freq * (sim_time + p * phase_step))
-            # # compute activations (rest angles)
-            # model_gt.tet_activations = network(phases) * activation_strength
-
-            state_gt = integrator.forward(model_gt, state_gt, sim_dt)
-            sim_time += sim_dt
-
+        imgs_inner = []
+        positions_inner = []
+        for i in range(0, sim_steps):
+            state2 = integrator2.forward(model, state2, sim_dt)
             if i % render_steps == 0:
                 rgba = renderer.forward(
-                    state_gt.q.unsqueeze(0).to(device),
-                    faces.unsqueeze(0).to(device),
-                    textures.to(device),
+                    state2.q[None, :],
+                    faces2[None, :],
+                    textures2,
                 )
-                imgs_gt.append(rgba)
-                positions_gt.append(state_gt.q)
-        if args.log:
-            write_imglist_to_gif(
-                imgs_gt,
-                os.path.join(logdir, "gt.gif"),
-                imgformat="rgba",
-                verbose=False,
-            )
-            write_imglist_to_dir(
-                imgs_gt, os.path.join(logdir, "gt"), imgformat="rgba",
-            )
-            # write_imglist_to_gif(
-            #     imgs_gt, "cache/fem/gt.gif", imgformat="rgba", verbose=False
-            # )
-            np.savetxt(
-                os.path.join(logdir, "mass_gt.txt"),
-                particle_inv_mass_gt.detach().cpu().numpy(),
-            )
-            np.savetxt(
-                os.path.join(logdir, "vertices.txt"),
-                state_gt.q.detach().cpu().numpy()
-            )
-            np.savetxt(
-                os.path.join(logdir, "face.txt"),
-                faces.detach().cpu().numpy()
-            )
+                imgs_inner.append(rgba)
+                positions_inner.append(state2.q)
 
-    massmodel = SimpleModel(
-        # particle_inv_mass_gt + 50 * torch.rand_like(particle_inv_mass_gt),
-        particle_inv_mass_gt + 0.1 * torch.rand_like(particle_inv_mass_gt),
-        activation=torch.nn.functional.relu,
-    )
-    # epochs = 100
-    save_gif_every = 1
-    # compare_every = 10
+        if args.method == "gradsim":
+            return sum(
+                jnp.mean((est - gt) ** 2)
+                for est, gt in zip(
+                    imgs_inner[::args.compare_every],
+                    imgs_gt[::args.compare_every]
+                )
+            ) / len(imgs_inner[::args.compare_every])
+        elif args.method in ("physics-only", "noisy-physics-only"):
+            return sum(
+                jnp.mean((est - gt) ** 2)
+                for est, gt in zip(
+                    positions_inner[::args.compare_every],
+                    positions_gt[::args.compare_every]
+                )
+            ) / len(positions_inner[::args.compare_every])
 
-    optimizer = torch.optim.Adam(massmodel.parameters(), lr=1e-1)
-    # optimizer = torch.optim.LBFGS(massmodel.parameters(), lr=1.0, tolerance_grad=1.e-5, tolerance_change=0.01, line_search_fn ="strong_wolfe")
-    lossfn = torch.nn.MSELoss()
+    grad_fn = jax.value_and_grad(loss_fn)
 
     try:
-
         for e in range(args.epochs):
+            loss_val, grads = grad_fn(params)
+            params, opt_state = _adam_step(params, grads, opt_state, lr=args.lr)
 
-            # if e in [20, 40]:
-            #     for param_group in optimizer.param_groups:
-            #         param_group["lr"] = param_group["lr"] * 0.1
+            inv_mass_cur = jnp.maximum(inv_mass_init + params["update"], 0.0)
+            inv_mass_err = float(jnp.mean((inv_mass_cur - particle_inv_mass_gt) ** 2))
+            mass_err = float(jnp.mean(
+                (1.0 / (inv_mass_cur + 1e-6) - 1.0 / (particle_inv_mass_gt + 1e-6)) ** 2
+            ))
 
-            builder = df.sim.ModelBuilder()
-            builder.add_soft_mesh(
-                pos=(-2.0, 2.0, 0.0),
-                rot=r,
-                scale=1.0,
-                vel=(vx_init.item(), 0.0, 0.0),
-                vertices=points,
-                indices=tet_indices,
-                density=10.0,
-            )
-
-            model = builder.finalize("cpu")
-
-            model.tet_kl = 1000.0
-            model.tet_km = 1000.0
-            model.tet_kd = 1.0
-
-            model.tri_ke = 0.0
-            model.tri_ka = 0.0
-            model.tri_kd = 0.0
-            model.tri_kb = 0.0
-
-            model.contact_ke = 1.0e4
-            model.contact_kd = 1.0
-            model.contact_kf = 10.0
-            model.contact_mu = 0.5
-
-            model.particle_radius = 0.05
-            model.ground = True
-            # model.gravity = torch.tensor((0.0, 0.0, 0.0), dtype=torch.float32, requires_grad=False)
-
-            model.particle_inv_mass = massmodel()
-            # print(torch.allclose(massmodel(), particle_mass_gt))
-
-            rest_angle = model.edge_rest_angle
-
-            # one fully connected layer + tanh activation
-            network = torch.nn.Sequential(
-                torch.nn.Linear(phase_count, model.tet_count, bias=False), torch.nn.Tanh()
-            )
-
-            activation_strength = 0.3
-            activation_penalty = 0.0
-
-            integrator = df.sim.SemiImplicitIntegrator()
-
-            sim_time = 0.0
-
-            state = model.state()
-            # loss = torch.zeros(1, requires_grad=True)
-
-            faces = model.tri_indices
-            textures = torch.cat(
-                (
-                    torch.ones(
-                        1, faces.shape[-2], 2, 1, dtype=torch.float32, device=device
-                    ),
-                    torch.ones(
-                        1, faces.shape[-2], 2, 1, dtype=torch.float32, device=device
-                    ),
-                    torch.zeros(
-                        1, faces.shape[-2], 2, 1, dtype=torch.float32, device=device
-                    ),
-                ),
-                dim=-1,
-            )
-
-            # states = []
-            imgs = []
-            positions = []
-            losses = []
-            inv_mass_errors = []
-            mass_errors = []
-            for i in trange(0, sim_steps):
-                # phases = torch.zeros(phase_count)
-                # for p in range(phase_count):
-                #     phases[p] = math.sin(phase_freq * (sim_time + p * phase_step))
-                # # compute activations (rest angles)
-                # model.tet_activations = network(phases) * activation_strength
-
-                state = integrator.forward(model, state, sim_dt)
-                sim_time += sim_dt
-
-                if i % render_steps == 0:
-                    rgba = renderer.forward(
-                        state.q.unsqueeze(0).to(device),
-                        faces.unsqueeze(0).to(device),
-                        textures.to(device),
-                    )
-                    imgs.append(rgba)
-                    positions.append(state.q)
-
-            if args.method == "gradsim":
-                loss = sum(
-                    [
-                        lossfn(est, gt)
-                        for est, gt in zip(
-                            imgs[::args.compare_every],
-                            imgs_gt[::args.compare_every]
-                        )
-                    ]
-                ) / len(imgs[::args.compare_every])
-            elif args.method == "physics-only":
-                loss = sum(
-                    [
-                        lossfn(est, gt)
-                        for est, gt in zip(
-                            positions[::args.compare_every],
-                            positions_gt[::args.compare_every]
-                        )
-                    ]
-                )
-            elif args.method == "noisy-physics-only":
-                loss = sum(
-                    [
-                        lossfn(est, gt + torch.rand_like(gt) * 0.1)
-                        for est, gt in zip(
-                            positions[::args.compare_every],
-                            positions_gt[::args.compare_every],
-                        )
-                    ]
-                )
-            inv_mass_err = lossfn(model.particle_inv_mass, particle_inv_mass_gt)
-            mass_err = lossfn(
-                1 / (model.particle_inv_mass + 1e-6), 1 / (particle_inv_mass_gt + 1e-6)
-            )
             print(
                 f"[EPOCH: {e:03d}] "
-                f"Loss: {loss.item():.5f} (Inv) Mass err: {inv_mass_err.item():.5f} "
-                f"Mass err: {mass_err.item():.5f}"
+                f"Loss: {float(loss_val):.5f} (Inv) Mass err: {inv_mass_err:.5f} "
+                f"Mass err: {mass_err:.5f}"
             )
 
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
+            losses.append(float(loss_val))
+            inv_mass_errors.append(inv_mass_err)
+            mass_errors.append(mass_err)
 
-            losses.append(loss.item())
-            inv_mass_errors.append(inv_mass_err.item())
-            mass_errors.append(mass_err.item())
-
-            if args.log and ((e % save_gif_every == 0) or (e == epochs - 1)):
+            if args.log and ((e % save_gif_every == 0) or (e == args.epochs - 1)):
+                # Re-run forward to get images for logging
+                builder3 = df.sim.ModelBuilder()
+                builder3.add_soft_mesh(
+                    pos=(-2.0, 2.0, 0.0),
+                    rot=r,
+                    scale=1.0,
+                    vel=(vx_init, 0.0, 0.0),
+                    vertices=points,
+                    indices=tet_indices,
+                    density=10.0,
+                )
+                model3 = builder3.finalize("cpu")
+                model3.tet_kl = 1000.0
+                model3.tet_km = 1000.0
+                model3.tet_kd = 1.0
+                model3.tri_ke = 0.0
+                model3.tri_ka = 0.0
+                model3.tri_kd = 0.0
+                model3.tri_kb = 0.0
+                model3.contact_ke = 1.0e4
+                model3.contact_kd = 1.0
+                model3.contact_kf = 10.0
+                model3.contact_mu = 0.5
+                model3.particle_radius = 0.05
+                model3.ground = True
+                model3.particle_inv_mass = jnp.maximum(inv_mass_init + params["update"], 0.0)
+                integrator3 = df.sim.SemiImplicitIntegrator()
+                state3 = model3.state()
+                faces3 = model3.tri_indices
+                textures3 = jnp.concatenate(
+                    (
+                        jnp.ones((1, faces3.shape[-2], 2, 1), dtype=jnp.float32),
+                        jnp.ones((1, faces3.shape[-2], 2, 1), dtype=jnp.float32),
+                        jnp.zeros((1, faces3.shape[-2], 2, 1), dtype=jnp.float32),
+                    ),
+                    axis=-1,
+                )
+                imgs_log = []
+                for i in range(0, sim_steps):
+                    state3 = integrator3.forward(model3, state3, sim_dt)
+                    if i % render_steps == 0:
+                        rgba = renderer.forward(state3.q[None, :], faces3[None, :], textures3)
+                        imgs_log.append(rgba)
                 write_imglist_to_gif(
-                    imgs, os.path.join(logdir, f"{e:05d}.gif"), imgformat="rgba"
+                    imgs_log, os.path.join(logdir, f"{e:05d}.gif"), imgformat="rgba"
                 )
                 write_imglist_to_dir(
-                    imgs, os.path.join(logdir, f"{e:05d}"), imgformat="rgba"
+                    imgs_log, os.path.join(logdir, f"{e:05d}"), imgformat="rgba"
                 )
                 np.savetxt(
                     os.path.join(logdir, f"mass_{e:05d}.txt"),
-                    model.particle_inv_mass.detach().cpu().numpy(),
+                    np.array(jnp.maximum(inv_mass_init + params["update"], 0.0)),
                 )
 
     except KeyboardInterrupt:

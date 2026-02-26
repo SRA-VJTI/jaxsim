@@ -5,7 +5,8 @@ from pathlib import Path
 
 import imageio
 import numpy as np
-import torch
+import jax
+import jax.numpy as jnp
 import tqdm
 from PIL import Image
 
@@ -18,7 +19,7 @@ def main():
 
     ROOT_DIR = Path(__file__).parent.resolve()
 
-    parser = argparse.ArgumentParser(description=" DIB-R Example")
+    parser = argparse.ArgumentParser(description="DIB-R Example")
 
     parser.add_argument(
         "--mesh",
@@ -51,11 +52,11 @@ def main():
     WIDTH = 256
 
     mesh = TriangleMesh.from_obj(args.mesh)
-    vertices = mesh.vertices.cuda()
-    faces = mesh.faces.long().cuda()
+    vertices = mesh.vertices
+    faces = mesh.faces  # already int32
 
     # Expand such that batch size = 1
-    vertices = vertices.unsqueeze(0)
+    vertices = vertices[None, :]
 
     ###########################
     # Normalize mesh position
@@ -71,8 +72,8 @@ def main():
     ###########################
 
     if not args.use_texture:
-        vert_min = torch.min(vertices, dim=1, keepdims=True)[0]
-        vert_max = torch.max(vertices, dim=1, keepdims=True)[0]
+        vert_min = jnp.min(vertices, axis=1, keepdims=True)
+        vert_max = jnp.max(vertices, axis=1, keepdims=True)
         colors = (vertices - vert_min) / (vert_max - vert_min)
 
     ###########################
@@ -80,11 +81,11 @@ def main():
     ###########################
 
     if args.use_texture:
-        uv = get_spherical_coords_x(vertices[0].cpu().numpy())
-        uv = torch.from_numpy(uv).cuda()
+        uv = get_spherical_coords_x(np.array(vertices[0]))
+        uv = jnp.array(uv)
 
         # Expand such that batch size = 1
-        uv = uv.unsqueeze(0)
+        uv = uv[None, :]
 
     ###########################
     # Load texture
@@ -92,16 +93,10 @@ def main():
 
     if args.use_texture:
         # Load image as numpy array
-        texture = np.array(Image.open(args.texture))
+        texture = np.array(Image.open(args.texture)).astype(np.float32) / 255.0
 
-        # Convert numpy array to PyTorch tensor
-        texture = torch.from_numpy(texture).cuda()
-
-        # Convert from [0, 255] to [0, 1]
-        texture = texture.float() / 255.0
-
-        # Convert to NxCxHxW layout
-        texture = texture.permute(2, 0, 1).unsqueeze(0)
+        # Convert to NxCxHxW layout (H,W,C) -> (C,H,W) then add batch dim
+        texture = jnp.array(texture.transpose(2, 0, 1)[None, :])
 
     ###########################
     # Render
@@ -109,7 +104,6 @@ def main():
 
     if args.use_texture:
         renderer_mode = "Lambertian"
-
     else:
         renderer_mode = "VertexColor"
 
@@ -118,11 +112,11 @@ def main():
     loop = tqdm.tqdm(list(range(0, 360, 4)))
     loop.set_description("Drawing")
 
-    args.output_path.mkdir(exist_ok=True)
+    Path(args.output_path).mkdir(exist_ok=True)
     savename = (
         "rendered_vertexcolor.gif" if not args.use_texture else "rendered_texture.gif"
     )
-    writer = imageio.get_writer(args.output_path / savename, mode="I")
+    writer = imageio.get_writer(Path(args.output_path) / savename, mode="I")
     for azimuth in loop:
         renderer.set_look_at_parameters(
             [90 - azimuth], [CAMERA_ELEVATION], [CAMERA_DISTANCE]
@@ -130,15 +124,14 @@ def main():
 
         if args.use_texture:
             predictions, _, _ = renderer(
-                points=[vertices, faces.long()], uv_bxpx2=uv, texture_bx3xthxtw=texture
+                points=[vertices, faces], uv_bxpx2=uv, texture_bx3xthxtw=texture
             )
-
         else:
             predictions, _, _ = renderer(
-                points=[vertices, faces.long()], colors_bxpx3=colors
+                points=[vertices, faces], colors_bxpx3=colors
             )
 
-        image = predictions.detach().cpu().numpy()[0]
+        image = np.array(predictions)[0]
         writer.append_data((image * 255).astype(np.uint8))
 
     writer.close()

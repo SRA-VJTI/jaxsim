@@ -6,8 +6,9 @@ import argparse
 from pathlib import Path
 
 import numpy as np
-import torch
-from torchdiffeq import odeint_adjoint as odeint
+import jax
+import jax.numpy as jnp
+from jax.experimental.ode import odeint
 from tqdm import tqdm, trange
 
 import kaolin
@@ -18,7 +19,7 @@ from gradsim.utils import meshutils
 from gradsim.utils.logging import write_imglist_to_gif
 
 
-class SimpleModel(torch.nn.Module):
+class SimpleModel:
     """A thin wrapper around a parameter, for convenient use with optim. """
 
     def __init__(self, param):

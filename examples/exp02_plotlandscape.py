@@ -2,9 +2,9 @@ import argparse
 import math
 import os
 
-# import imageio
 import numpy as np
-import torch
+import jax
+import jax.numpy as jnp
 from tqdm import trange
 
 from gradsim.bodies import RigidBody
@@ -76,33 +76,20 @@ if __name__ == "__main__":
             f"Arg --compare-every cannot be greater than or equal to {args.simsteps}."
         )
 
-    # Seed RNG for repeatability.
-    torch.manual_seed(args.seed)
-
-    # We don't need gradients in this experiment
-    torch.autograd.set_grad_enabled(False)
-
-    # Device to store tensors on (MUST be CUDA-capable, for renderer to work).
-    device = "cuda:0"
-
-    # Load a body (from a triangle mesh obj file).
     mesh = TriangleMesh.from_obj(args.infile)
-    vertices = meshutils.normalize_vertices(mesh.vertices.unsqueeze(0)).to(device)
-    faces = mesh.faces.to(device).unsqueeze(0)
-    textures = torch.cat(
+    vertices = meshutils.normalize_vertices(mesh.vertices[None, :])
+    faces = mesh.faces[None, :]
+    textures = jnp.concatenate(
         (
-            torch.ones(1, faces.shape[1], 2, 1, dtype=torch.float32, device=device),
-            torch.ones(1, faces.shape[1], 2, 1, dtype=torch.float32, device=device),
-            torch.zeros(1, faces.shape[1], 2, 1, dtype=torch.float32, device=device),
+            jnp.ones((1, faces.shape[1], 2, 1), dtype=jnp.float32),
+            jnp.ones((1, faces.shape[1], 2, 1), dtype=jnp.float32),
+            jnp.zeros((1, faces.shape[1], 2, 1), dtype=jnp.float32),
         ),
-        dim=-1,
+        axis=-1,
     )
-    masses_gt = torch.nn.Parameter(
-        torch.ones(vertices.shape[1], dtype=vertices.dtype, device=device),
-        requires_grad=True,
-    )
-    position = torch.tensor([0.0, 4.0, 0.0], dtype=torch.float32, device=device)
-    orientation = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device=device)
+    masses_gt = jnp.ones(vertices.shape[1], dtype=jnp.float32)
+    position = jnp.array([0.0, 4.0, 0.0], dtype=jnp.float32)
+    orientation = jnp.array([1.0, 0.0, 0.0, 0.0], dtype=jnp.float32)
     restitution_gt = 0.8
     body = RigidBody(
         vertices[0],
@@ -112,16 +99,12 @@ if __name__ == "__main__":
         restitution=restitution_gt,
     )
 
-    # Create a force that applies gravity (g = 10 metres / second^2).
-    # gravity = Gravity(device=device)
-    force_magnitude = 10.0  # / vertices.shape[-2]
+    force_magnitude = 10.0
     gravity = ConstantForce(
         magnitude=force_magnitude,
-        direction=torch.tensor([0.0, -1.0, 0.0]),
-        device=device,
+        direction=jnp.array([0.0, -1.0, 0.0]),
     )
 
-    # Add this force to the body.
     body.add_external_force(gravity)
 
     sim_duration = 1.5
@@ -131,35 +114,24 @@ if __name__ == "__main__":
     sim_steps = int(sim_duration / dtime)
     render_every = sim_substeps
 
-    # Initialize the simulator with the body at the origin.
     sim_gt = Simulator(
         bodies=[body], engine=SemiImplicitEulerWithContacts(), dtime=dtime
     )
 
-    # Initialize the renderer.
-    renderer = SoftRenderer(camera_mode="look_at", device=device)
+    renderer = SoftRenderer(camera_mode="look_at")
     camera_distance = 10.0
     elevation = 30.0
     azimuth = 0.0
     renderer.set_eye_from_angles(camera_distance, elevation, azimuth)
 
-    # Run the simulation.
-    # outfile = "cache/a.gif"
-    # writer = imageio.get_writer(outfile, mode="I")
     imgs_gt = []
     for i in trange(sim_steps):
         sim_gt.step()
-        # print("Body is at:", body.position)
         if i % render_every == 0:
             rgba = renderer.forward(
-                body.get_world_vertices().unsqueeze(0), faces, textures
+                body.get_world_vertices()[None, :], faces, textures
             )
             imgs_gt.append(rgba)
-            # img = rgba[0].permute(1, 2, 0).detach().cpu().numpy()
-            # writer.append_data((255 * img).astype(np.uint8))
-    # writer.close()
-
-    lossfn = torch.nn.MSELoss()
 
     mass_estimates = []
     mass_errors = []
@@ -167,52 +139,46 @@ if __name__ == "__main__":
     restitution_errors = []
     losses = []
 
-    mass_interp = torch.linspace(0.1, 5, 50, dtype=vertices.dtype, device=device)
-    e_interp = torch.linspace(0.4, 1.0, 10, dtype=vertices.dtype, device=device)
+    mass_interp = jnp.linspace(0.1, 5, 50, dtype=jnp.float32)
+    e_interp = jnp.linspace(0.4, 1.0, 10, dtype=jnp.float32)
 
-    for i in trange(mass_interp.numel()):
-        for j in trange(e_interp.numel()):
-            masses_cur = torch.nn.Parameter(
-                mass_interp[i]
-                * torch.ones(vertices.shape[1], dtype=vertices.dtype, device=device),
-                requires_grad=False,
-            )
-            e_cur = e_interp[j].item()
-            body = RigidBody(vertices[0], masses=masses_cur, restitution=e_cur)
+    for i in trange(mass_interp.size):
+        for j in trange(e_interp.size):
+            masses_cur = mass_interp[i] * jnp.ones(vertices.shape[1], dtype=jnp.float32)
+            e_cur = float(e_interp[j])
+            body_est = RigidBody(vertices[0], masses=masses_cur, restitution=e_cur)
+            body_est.add_external_force(gravity)
             sim_est = Simulator(
-                bodies=[body], engine=SemiImplicitEulerWithContacts(), dtime=dtime
+                bodies=[body_est], engine=SemiImplicitEulerWithContacts(), dtime=dtime
             )
 
             imgs_est = []
             for t in range(sim_steps):
                 sim_est.step()
-                if i % render_every == 0:
+                if t % render_every == 0:
                     rgba = renderer.forward(
-                        body.get_world_vertices().unsqueeze(0), faces, textures
+                        body_est.get_world_vertices()[None, :], faces, textures
                     )
-                    imgs_gt.append(rgba)
-                imgs_est.append(rgba)
+                    imgs_est.append(rgba)
             loss = sum(
                 [
-                    lossfn(est, gt)
+                    jnp.mean((est - gt) ** 2)
                     for est, gt in zip(
                         imgs_est[:: args.compare_every], imgs_gt[:: args.compare_every]
                     )
                 ]
             ) / (len(imgs_est[:: args.compare_every]))
 
-            mass_estimates.append(mass_interp[i].item())
-            mass_errors.append((masses_cur - masses_gt).abs().mean().item())
+            mass_estimates.append(float(mass_interp[i]))
+            mass_errors.append(float(jnp.abs(masses_cur - masses_gt).mean()))
             restitution_estimates.append(e_cur)
             restitution_errors.append(abs(restitution_gt - e_cur))
-            losses.append(loss.item())
+            losses.append(float(loss))
 
-    # Save viz, if specified.
     if args.log:
         logdir = os.path.join(args.logdir, args.expid)
         os.makedirs(logdir, exist_ok=True)
 
-        # Write metrics.
         np.savetxt(os.path.join(logdir, "losses.txt"), losses)
         np.savetxt(os.path.join(logdir, "mass_estimates.txt"), mass_estimates)
         np.savetxt(os.path.join(logdir, "mass_errors.txt"), mass_errors)

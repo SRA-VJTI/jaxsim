@@ -8,58 +8,49 @@ from pathlib import Path
 
 import imageio
 import numpy as np
-import torch
+import jax
+import jax.numpy as jnp
 from tqdm import tqdm, trange
 
 from gradsim.renderutils import TriangleMesh
 from gradsim.renderutils.dibr.renderer import Renderer as DIBRenderer
 from gradsim.renderutils.dibr.utils.sphericalcoord import get_spherical_coords_x
 
-# Example script that uses SoftRas to deform a sphere mesh to aproximate
+# Example script that uses DIB-R to deform a sphere mesh to approximate
 # the image of a banana.
 
 
-class Model(torch.nn.Module):
-    """Wrap vertices into an nn.Module, for optimization. """
-
-    def __init__(self, vertices):
-        super(Model, self).__init__()
-        self.update = torch.nn.Parameter(torch.rand(vertices.shape) * 0.001)
-        self.verts = vertices
-
-    def forward(self):
-        return self.update + self.verts
+def _adam_init(params):
+    return {k: {"m": jnp.zeros_like(v), "v": jnp.zeros_like(v), "t": 0}
+            for k, v in params.items()}
 
 
-def compute_laplacian(vertices, faces):
-    v1 = faces[:, 0].view(-1, 1)
-    v2 = faces[:, 1].view(-1, 1)
-    v3 = faces[:, 2].view(-1, 1)
-
-    numvertices = vertices.shape[0]
-    identity_indices = torch.arange(numvertices).view(-1, 1).to(v1.device)
-    identity = torch.cat((identity_indices, identity_indices), dim=1).to(v1.device)
-    identity = torch.cat((identity, identity))
-
-    i_1 = torch.cat((v1, v2), dim=1)
-    i_2 = torch.cat((v1, v3), dim=1)
-
-    i_3 = torch.cat((v2, v1), dim=1)
-    i_4 = torch.cat((v2, v3), dim=1)
-
-    i_5 = torch.cat((v3, v2), dim=1)
-    i_6 = torch.cat((v3, v1), dim=1)
-    indices = torch.cat((identity, i_1, i_2, i_3, i_4, i_5, i_6), dim=0).t()
-    values = torch.ones(indices.shape[1]).to(indices.device) * 0.5
-    return torch.sparse.FloatTensor(
-        indices, values, torch.Size([numvertices, numvertices])
-    ).to(vertices)
+def _adam_step(params, grads, state, lr, beta1=0.5, beta2=0.99, eps=1e-8):
+    new_params, new_state = {}, {}
+    for k in params:
+        t = state[k]["t"] + 1
+        m = beta1 * state[k]["m"] + (1 - beta1) * grads[k]
+        v = beta2 * state[k]["v"] + (1 - beta2) * grads[k] ** 2
+        m_hat = m / (1 - beta1 ** t)
+        v_hat = v / (1 - beta2 ** t)
+        new_params[k] = params[k] - lr * m_hat / (jnp.sqrt(v_hat) + eps)
+        new_state[k] = {"m": m, "v": v, "t": t}
+    return new_params, new_state
 
 
-def compute_laplacian_loss(vertices1, faces1, vertices2, faces2):
-    laplacian1 = compute_laplacian(vertices1, faces1)
-    laplacian2 = compute_laplacian(vertices2, faces2)
-    return ((laplacian1 - laplacian2) ** 2).sum(-2).mean()
+def _build_laplacian_matrix(nv, faces_np):
+    """Build the Laplacian matrix using dense numpy (replaces torch.sparse.FloatTensor)."""
+    L = np.zeros((nv, nv), dtype=np.float32)
+    # Diagonal entries: 2 identity entries * 0.5 = 1.0 per vertex
+    np.fill_diagonal(L, 1.0)
+    v1, v2, v3 = faces_np[:, 0], faces_np[:, 1], faces_np[:, 2]
+    np.add.at(L, (v1, v2), 0.5)
+    np.add.at(L, (v1, v3), 0.5)
+    np.add.at(L, (v2, v1), 0.5)
+    np.add.at(L, (v2, v3), 0.5)
+    np.add.at(L, (v3, v2), 0.5)
+    np.add.at(L, (v3, v1), 0.5)
+    return jnp.array(L)
 
 
 if __name__ == "__main__":
@@ -84,10 +75,6 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # Device to store tensors on. Must be a CUDA device.
-    device = "cuda:0"
-
-    # Initialize the soft rasterizer.
     if args.renderer == "vc":
         renderer = DIBRenderer(256, 256, mode="VertexColor")
     elif args.renderer == "lam":
@@ -97,134 +84,143 @@ if __name__ == "__main__":
     else:
         raise ValueError(
             'Renderer mode must be one of ["VertexColor", "Lambertian"'
-            f' or "SphericalHarmonics"]Got {args.renderer} instead.'
+            f' or "SphericalHarmonics"]. Got {args.renderer} instead.'
         )
 
-    # Camera settings.
-    camera_distance = (
-        2.0  # Distance of the camera from the origin (i.e., center of the object)
-    )
-    elevation = 30.0  # Angle of elevation
-    azimuth = 0.0  # Azimuth angle
+    camera_distance = 2.0
+    elevation = 30.0
+    azimuth = 0.0
 
-    # Directory in which sample data is located.
     DATA_DIR = Path(__file__).parent / "sampledata"
 
-    # Directory in which logs (gifs) are saved.
     logdir = Path(__file__).parent / "cache" / "dibr"
     logdir.mkdir(exist_ok=True)
 
-    # Read in the input mesh. TODO: Add filepath as argument.
     mesh = TriangleMesh.from_obj(DATA_DIR / "dibr_sphere.obj")
 
-    # Output filename to write out a rendered .gif to, showing the progress of optimization.
     progressfile = logdir / "vertex_optimization_progress.gif"
-    # Output filename to write out a rendered .gif file to, rendering the optimized mesh.
     outfile = logdir / "vertex_optimization_output.gif"
 
-    # Extract the vertices, faces, and texture the mesh (currently color with white).
-    vertices = mesh.vertices
-    faces = mesh.faces
-    vertices = vertices[None, :, :].cuda()
-    faces = faces[None, :, :].cuda()
-    # Initialize all faces to yellow (to color the banana)!
-    textures = torch.stack(
+    vertices = mesh.vertices[None, :, :]
+    faces = mesh.faces[None, :, :]
+
+    textures = jnp.stack(
         (
-            torch.ones(1, vertices.shape[-2], dtype=torch.float32, device=device),
-            torch.ones(1, vertices.shape[-2], dtype=torch.float32, device=device),
-            torch.zeros(1, vertices.shape[-2], dtype=torch.float32, device=device),
+            jnp.ones((1, vertices.shape[-2]), dtype=jnp.float32),
+            jnp.ones((1, vertices.shape[-2]), dtype=jnp.float32),
+            jnp.zeros((1, vertices.shape[-2]), dtype=jnp.float32),
         ),
-        dim=-1,
+        axis=-1,
     )
 
     uv, texture_img, lightparam = None, None, None
     if args.renderer in ["lam", "sh"]:
-        uv = get_spherical_coords_x(vertices[0].cpu().numpy())
-        uv = torch.from_numpy(uv).cuda().float().unsqueeze(0) / 255.0
-        # texture_img = imageio.imread("cache/uvassets/flower.png")
-        # texture_img = torch.from_numpy(texture_img).cuda().float() / 255.0
-        # texture_img = texture_img.permute(2, 0, 1).unsqueeze(0)
-        texture_img = torch.zeros(1, 3, 128, 128, dtype=torch.float32, device=device)
-        texture_img[:, 0, :, :] = 1.0
-        texture_img[:, 1, :, :] = 1.0
-
+        uv_np = get_spherical_coords_x(np.array(vertices[0]))
+        uv = jnp.array(uv_np)[None, :, :] / 255.0
+        texture_img = jnp.zeros((1, 3, 128, 128), dtype=jnp.float32)
+        texture_img = texture_img.at[:, 0, :, :].set(1.0)
+        texture_img = texture_img.at[:, 1, :, :].set(1.0)
         if args.renderer == "sh":
-            # lightparam = torch.tensor([0.0, 1.0, 0.0], device=device)
-            lightparam = torch.rand(9, device=device)
+            lightparam = jnp.zeros(9, dtype=jnp.float32)
 
-    img_target = torch.from_numpy(
+    img_target = jnp.array(
         imageio.imread(DATA_DIR / "banana.png").astype(np.float32) / 255
-    ).cuda()
-    img_target = img_target[None, ...]  # .permute(0, 3, 1, 2)
+    )
+    img_target = img_target[None, ...]
 
-    # Create a 'model' (an nn.Module) that wraps around the vertices, making it 'optimizable'.
-    # TODO: Replace with a torch optimizer that takes vertices as a 'params' argument.
-    # Deform the vertices slightly.
-    model = Model(vertices.clone()).cuda()
+    # Pre-compute Laplacian matrix (static, based on face topology only)
+    faces_np = np.array(mesh.faces)
+    nv = mesh.vertices.shape[0]
+    laplacian_matrix = _build_laplacian_matrix(nv, faces_np)
+
+    params = {"update": jnp.zeros(vertices.shape, dtype=jnp.float32)}
+    opt_state = _adam_init(params)
+
     renderer.set_look_at_parameters([90 - azimuth], [elevation], [camera_distance])
-    optimizer = torch.optim.Adam(model.parameters(), 0.01, betas=(0.5, 0.99))
-    mseloss = torch.nn.MSELoss()
 
-    # Perform vertex optimization.
-    if not args.no_viz:
-        writer = imageio.get_writer(progressfile, mode="I")
-    for i in trange(args.iters):
-        optimizer.zero_grad()
-        new_vertices = model()
+    def loss_fn(params):
+        new_vertices = vertices + params["update"]
         if args.renderer == "vc":
             img_pred, alpha, _ = renderer.forward(
-                points=[new_vertices, faces[0].long()], colors_bxpx3=textures
+                points=[new_vertices, faces[0]], colors_bxpx3=textures
             )
         elif args.renderer == "lam":
             img_pred, alpha, _ = renderer.forward(
-                points=[new_vertices, faces[0].long()],
+                points=[new_vertices, faces[0]],
                 uv_bxpx2=uv,
                 texture_bx3xthxtw=texture_img,
             )
         elif args.renderer == "sh":
             img_pred, alpha, _ = renderer.forward(
-                points=[new_vertices, faces[0].long()],
+                points=[new_vertices, faces[0]],
                 uv_bxpx2=uv,
                 texture_bx3xthxtw=texture_img,
                 lightparam=lightparam,
             )
-        rgba = torch.cat((img_pred, alpha), dim=-1)
-        laplacian_loss = compute_laplacian_loss()
-        loss = mseloss(rgba, img_target) + laplacian_loss
-        loss.backward()
-        optimizer.step()
+        rgba = jnp.concatenate((img_pred, alpha), axis=-1)
+        mse = jnp.mean((rgba - img_target) ** 2)
+        # Laplacian regularization on vertex deformation
+        deformation = new_vertices[0] - vertices[0]
+        Ld = jnp.matmul(laplacian_matrix, deformation)
+        laplacian_loss = jnp.mean(Ld ** 2)
+        return mse + laplacian_loss
+
+    grad_fn = jax.value_and_grad(loss_fn)
+
+    if not args.no_viz:
+        writer = imageio.get_writer(progressfile, mode="I")
+    for i in trange(args.iters):
+        loss_val, grads = grad_fn(params)
+        params, opt_state = _adam_step(params, grads, opt_state, lr=0.01)
         if i % 20 == 0:
-            # TODO: Add functionality to write to gif output file.
-            tqdm.write(f"Loss: {loss.item():.5}")
+            tqdm.write(f"Loss: {float(loss_val):.5}")
             if not args.no_viz:
-                img = img_pred[0].detach().cpu().numpy()
+                new_vertices = vertices + params["update"]
+                if args.renderer == "vc":
+                    img_pred, alpha, _ = renderer.forward(
+                        points=[new_vertices, faces[0]], colors_bxpx3=textures
+                    )
+                elif args.renderer == "lam":
+                    img_pred, alpha, _ = renderer.forward(
+                        points=[new_vertices, faces[0]],
+                        uv_bxpx2=uv,
+                        texture_bx3xthxtw=texture_img,
+                    )
+                elif args.renderer == "sh":
+                    img_pred, alpha, _ = renderer.forward(
+                        points=[new_vertices, faces[0]],
+                        uv_bxpx2=uv,
+                        texture_bx3xthxtw=texture_img,
+                        lightparam=lightparam,
+                    )
+                img = np.array(img_pred[0])
                 writer.append_data((255 * img).astype(np.uint8))
     if not args.no_viz:
         writer.close()
 
-        # Write optimized mesh to output file.
         writer = imageio.get_writer(outfile, mode="I")
         for azimuth in trange(0, 360, 6):
             renderer.set_look_at_parameters(
                 [90 - azimuth], [elevation], [camera_distance]
             )
+            new_vertices = vertices + params["update"]
             if args.renderer == "vc":
                 img_pred, alpha, _ = renderer.forward(
-                    points=[new_vertices, faces[0].long()], colors_bxpx3=textures
+                    points=[new_vertices, faces[0]], colors_bxpx3=textures
                 )
             elif args.renderer == "lam":
                 img_pred, alpha, _ = renderer.forward(
-                    points=[new_vertices, faces[0].long()],
+                    points=[new_vertices, faces[0]],
                     uv_bxpx2=uv,
                     texture_bx3xthxtw=texture_img,
                 )
             elif args.renderer == "sh":
                 img_pred, alpha, _ = renderer.forward(
-                    points=[new_vertices, faces[0].long()],
+                    points=[new_vertices, faces[0]],
                     uv_bxpx2=uv,
                     texture_bx3xthxtw=texture_img,
                     lightparam=lightparam,
                 )
-            img = img_pred[0].detach().cpu().numpy()
+            img = np.array(img_pred[0])
             writer.append_data((255 * img).astype(np.uint8))
         writer.close()
