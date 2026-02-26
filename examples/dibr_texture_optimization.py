@@ -8,22 +8,30 @@ from pathlib import Path
 
 import imageio
 import numpy as np
-import torch
+import jax
+import jax.numpy as jnp
 from tqdm import tqdm, trange
 
 from gradsim.renderutils import TriangleMesh
 from gradsim.renderutils.dibr.renderer import Renderer as DIBRenderer
 
 
-class Model(torch.nn.Module):
-    """Wrap textures into an nn.Module, for optimization. """
+def _adam_init(params):
+    return {k: {"m": jnp.zeros_like(v), "v": jnp.zeros_like(v), "t": 0}
+            for k, v in params.items()}
 
-    def __init__(self, textures):
-        super(Model, self).__init__()
-        self.textures = torch.nn.Parameter(textures)
 
-    def forward(self):
-        return torch.sigmoid(self.textures)
+def _adam_step(params, grads, state, lr, beta1=0.5, beta2=0.99, eps=1e-8):
+    new_params, new_state = {}, {}
+    for k in params:
+        t = state[k]["t"] + 1
+        m = beta1 * state[k]["m"] + (1 - beta1) * grads[k]
+        v = beta2 * state[k]["v"] + (1 - beta2) * grads[k] ** 2
+        m_hat = m / (1 - beta1 ** t)
+        v_hat = v / (1 - beta2 ** t)
+        new_params[k] = params[k] - lr * m_hat / (jnp.sqrt(v_hat) + eps)
+        new_state[k] = {"m": m, "v": v, "t": t}
+    return new_params, new_state
 
 
 if __name__ == "__main__":
@@ -40,100 +48,78 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # Device to store tensors on. Must be a CUDA device.
-    device = "cuda:0"
-
-    # Initialize the soft rasterizer.
     renderer = DIBRenderer(256, 256, mode="VertexColor")
 
-    # Camera settings.
-    camera_distance = (
-        2.0  # Distance of the camera from the origin (i.e., center of the object)
-    )
-    elevation = 30.0  # Angle of elevation
-    azimuth = 0.0  # Azimuth angle
+    camera_distance = 2.0
+    elevation = 30.0
+    azimuth = 0.0
 
-    # Directory in which sample data is located.
     DATA_DIR = Path(__file__).parent / "sampledata"
 
-    # Directory in which logs (gifs) are saved.
     logdir = Path(__file__).parent / "cache" / "dibr"
     logdir.mkdir(exist_ok=True)
 
-    # Read in the input mesh. TODO: Add filepath as argument.
     mesh = TriangleMesh.from_obj(DATA_DIR / "banana.obj")
 
-    # Output filename to write out a rendered .gif to, showing the progress of optimization.
     progressfile = logdir / "texture_optimization_progress.gif"
-    # Output filename to write out a rendered .gif file to, rendering the optimized mesh.
     outfile = logdir / "texture_optimization_output.gif"
 
-    # Extract the vertices, faces, and texture the mesh (currently color with white).
-    vertices = mesh.vertices
-    faces = mesh.faces
-    vertices = vertices[None, :, :].cuda()
-    faces = faces[None, :, :].cuda()
-    # textures = torch.ones(1, faces.shape[1], 2, 3, dtype=torch.float32, device=device)
-    textures = torch.ones(1, vertices.shape[-2], 3, dtype=torch.float32, device=device)
+    vertices = mesh.vertices[None, :, :]
+    faces = mesh.faces[None, :, :]
+    textures_init = jnp.ones((1, vertices.shape[-2], 3), dtype=jnp.float32)
 
-    # Translate the mesh such that its centered at the origin.
     vertices_max = vertices.max()
     vertices_min = vertices.min()
     vertices_middle = (vertices_max + vertices_min) / 2.0
     vertices = vertices - vertices_middle
-    # Scale the vertices slightly (so that they occupy a sizeable image area).
-    # Skip if using models other than the banana.obj file.
     coef = 5
     vertices = vertices * coef
 
-    img_target = torch.from_numpy(
+    img_target = jnp.array(
         imageio.imread(DATA_DIR / "banana.png").astype(np.float32) / 255
-    ).cuda()
-    img_target = img_target[None, ...]  # .permute(0, 3, 1, 2)
+    )
+    img_target = img_target[None, ...]  # (1, H, W, 4)
 
-    # Create a 'model' (an nn.Module) that wraps around the vertices, making it 'optimizable'.
-    # TODO: Replace with a torch optimizer that takes vertices as a 'params' argument.
-    # Deform the vertices slightly.
-    model = Model(textures).cuda()
-    # renderer.transform.set_eyes_from_angles(camera_distance, elevation, azimuth)
-    optimizer = torch.optim.Adam(model.parameters(), 1.0, betas=(0.5, 0.99))
+    params = {"textures": textures_init}
+    opt_state = _adam_init(params)
+
     renderer.set_look_at_parameters([90 - azimuth], [elevation], [camera_distance])
-    mseloss = torch.nn.MSELoss()
 
-    # Perform texture optimization.
+    def loss_fn(params):
+        textures = jax.nn.sigmoid(params["textures"])
+        img_pred, alpha, _ = renderer.forward(
+            points=[vertices, faces[0]], colors_bxpx3=textures
+        )
+        return jnp.mean((img_pred[..., :3] - img_target[..., :3]) ** 2)
+
+    grad_fn = jax.value_and_grad(loss_fn)
+
     if not args.no_viz:
         writer = imageio.get_writer(progressfile, mode="I")
     for i in trange(args.iters):
-        optimizer.zero_grad()
-        textures = model()
-        img_pred, alpha, _ = renderer.forward(
-            points=[vertices, faces[0].long()], colors_bxpx3=textures
-        )
-        # rgba = torch.cat((img_pred, alpha), axis=-1)
-        # print(img_pred.shape, alpha.shape, rgba.shape, img_target.shape)
-        loss = mseloss(img_pred[..., :3], img_target[..., :3])
-        loss.backward()
-        optimizer.step()
+        loss_val, grads = grad_fn(params)
+        params, opt_state = _adam_step(params, grads, opt_state, lr=1.0)
         if i % 5 == 0:
-            # TODO: Add functionality to write to gif output file.
-            tqdm.write(f"Loss: {loss.item():.5}")
+            tqdm.write(f"Loss: {float(loss_val):.5}")
             if not args.no_viz:
-                img = img_pred[0].detach().cpu().numpy()
+                textures = jax.nn.sigmoid(params["textures"])
+                img_pred, _, _ = renderer.forward(
+                    points=[vertices, faces[0]], colors_bxpx3=textures
+                )
+                img = np.array(img_pred[0])
                 writer.append_data((255 * img).astype(np.uint8))
     if not args.no_viz:
         writer.close()
 
-        # Write optimized mesh to output file.
         writer = imageio.get_writer(outfile, mode="I")
-        for azimuth in trange(0, 360, 6):
+        for az in trange(0, 360, 6):
             renderer.set_look_at_parameters(
-                [90 - azimuth], [elevation], [camera_distance]
+                [90 - az], [elevation], [camera_distance]
             )
-            textures = model()
+            textures = jax.nn.sigmoid(params["textures"])
             img_pred, _, _ = renderer.forward(
-                points=[vertices, faces[0].long()], colors_bxpx3=textures
+                points=[vertices, faces[0]], colors_bxpx3=textures
             )
-            # rgba = torch.cat((img_pred, alpha), axis=-1)
-            img = img_pred[0].detach().cpu().numpy()
+            img = np.array(img_pred[0])
             writer.append_data((255 * img).astype(np.uint8))
         writer.close()

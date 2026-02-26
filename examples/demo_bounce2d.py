@@ -5,12 +5,31 @@ Optimize parameters of a bouncing ball in 2D.
 import argparse
 from pathlib import Path
 
-import torch
+import jax
+import jax.numpy as jnp
 from tqdm import tqdm, trange
 
 from gradsim.renderutils import SoftRenderer, TriangleMesh
 from gradsim.utils import meshutils
 from gradsim.utils.logging import write_imglist_to_gif
+
+
+def _adam_init(params):
+    return {k: {"m": jnp.zeros_like(v), "v": jnp.zeros_like(v), "t": 0}
+            for k, v in params.items()}
+
+
+def _adam_step(params, grads, state, lr, beta1=0.5, beta2=0.99, eps=1e-8):
+    new_params, new_state = {}, {}
+    for k in params:
+        t = state[k]["t"] + 1
+        m = beta1 * state[k]["m"] + (1 - beta1) * grads[k]
+        v = beta2 * state[k]["v"] + (1 - beta2) * grads[k] ** 2
+        m_hat = m / (1 - beta1 ** t)
+        v_hat = v / (1 - beta2 ** t)
+        new_params[k] = params[k] - lr * m_hat / (jnp.sqrt(v_hat) + eps)
+        new_state[k] = {"m": m, "v": v, "t": t}
+    return new_params, new_state
 
 
 class BouncingBall2D:
@@ -22,105 +41,46 @@ class BouncingBall2D:
         height=1.0,
         speed=1.0,
         gravity=-10.0,
-        device="cpu",
     ):
-        self.device = device
-        self.radius = self.convert_to_tensor(radius)
-        self.theta = self.convert_to_tensor(theta)
-        self.height = self.convert_to_tensor(height)
-        self.speed = self.convert_to_tensor(speed)
+        self.radius = jnp.array([radius], dtype=jnp.float32) if not hasattr(radius, 'shape') else radius
+        self.theta = jnp.array([theta], dtype=jnp.float32) if not hasattr(theta, 'shape') else theta
+        self.height = jnp.array([height], dtype=jnp.float32) if not hasattr(height, 'shape') else height
+        self.speed = jnp.array([speed], dtype=jnp.float32) if not hasattr(speed, 'shape') else speed
 
         if pos is None:
-            self.position_initial = torch.zeros(
-                2, dtype=self.radius.dtype, device=self.device
-            )
+            self.position_initial = jnp.zeros(2, dtype=jnp.float32)
         else:
-            if not torch.is_tensor(pos):
-                raise ValueError(
-                    f"Input pos must be of type torch.Tensor. Got {type(pos)}"
-                )
             self.position_initial = pos
-        self.velocity_initial = torch.zeros(
-            2, dtype=self.radius.dtype, device=self.device
-        )
-        self.position_initial[1] = self.height
-        self.velocity_initial[0] = self.speed * self.theta.cos()
-        self.velocity_initial[1] = self.speed * self.theta.sin()
 
-        self.gravity = torch.zeros_like(self.position_initial)
-        self.gravity[1] = gravity
+        self.velocity_initial = jnp.zeros(2, dtype=jnp.float32)
+        self.position_initial = self.position_initial.at[1].set(self.height[0])
+        self.velocity_initial = self.velocity_initial.at[0].set(self.speed[0] * jnp.cos(self.theta[0]))
+        self.velocity_initial = self.velocity_initial.at[1].set(self.speed[0] * jnp.sin(self.theta[0]))
 
-        # Variables to store current state
-        self.position_cur = self.position_initial.clone()
-        self.velocity_cur = self.velocity_initial.clone()
-        self.height_cur = self.height.clone()
+        self.gravity = jnp.array([0.0, gravity], dtype=jnp.float32)
 
-        self.time = 0.0
+        self.position_cur = self.position_initial
+        self.velocity_cur = self.velocity_initial
+
         self.eps = 1e-16
 
-    def convert_to_tensor(self, inp):
-        if torch.is_tensor(inp):
-            return inp.to(self.device)
-        else:
-            return torch.tensor([inp], dtype=torch.float32, device=self.device)
-
     def step(self, dtime):
+        vel_cache = self.velocity_cur
+        pos_cache = self.position_cur
 
-        # Cache current velocity and position (needed to check collision)
-        self.velocity_cur_cache = self.velocity_cur.clone()
-        self.position_cur_cache = self.position_cur.clone()
+        # Leapfrog method
+        pos = pos_cache + vel_cache * dtime / 2
+        vel = vel_cache + self.gravity * dtime
+        pos = pos + vel * dtime / 2
 
-        # Energy conservation: Leapfrog Method
-        # https://adamdempsey90.github.io/python/bouncing_ball/bouncing_ball.html
+        # Collision handling with jnp.where (avoids Python conditionals on abstract values)
+        collides = pos[1] < self.radius[0]
+        dtime_new = (self.radius[0] - pos_cache[1]) / (vel_cache[1] + self.eps)
+        vel_after = jnp.array([vel[0], -(vel_cache[1] + self.gravity[1] * dtime_new)])
+        pos_after = jnp.array([pos_cache[0] + vel_cache[0] * dtime_new, self.radius[0]])
 
-        self.position_cur = self.position_cur + self.velocity_cur * dtime / 2
-        self.velocity_cur = self.velocity_cur + self.gravity * dtime
-        self.position_cur = self.position_cur + self.velocity_cur * dtime / 2
-
-        # Handle collision with ground
-        if self.position_cur[1] < self.radius:
-            # Ball cannot sink below ground
-            self.position_cur[1] = self.radius
-
-            dtime_new = (self.radius - self.position_cur_cache[1]) / (
-                self.velocity_cur_cache[1] + self.eps
-            )
-            self.velocity_cur[1] = -(
-                self.velocity_cur_cache[1] + self.gravity[1] * dtime_new
-            )
-            self.position_cur[0] = (
-                self.position_cur_cache[0] + self.velocity_cur[0] * dtime_new
-            )
-            self.time = self.time + dtime_new.item()
-
-            # # Time of impact estimation
-            # dtime_new = -self.position_cur_cache[1] / (self.velocity_cur_cache[1] + self.eps)
-            # # Velocity at time of impact
-            # self.velocity_cur[1] = -(self.velocity_cur_cache[1] + self.gravity[1] * dtime_new)
-            # # Recompute the position, using this new velocity
-            # self.position_cur[0] = self.position_cur_cache[0] + self.velocity_cur[0] * dtime_new
-
-            # self.position_cur = self.position_cur + self.velocity_cur * (dtime_new - dtime) / 2
-            # self.velocity_cur = self.velocity_cur + self.gravity * (dtime_new - dtime)
-            # self.position_cur = self.position_cur + self.velocity_cur * (dtime_new - dtime) / 2
-            # self.time = self.time + dtime_new  # Double check
-        else:
-            self.time = self.time + dtime
-
-        # Update current height
-        self.height_cur = self.position_cur[1]
-
-
-class SimpleModel(torch.nn.Module):
-    """A thin wrapper around a parameter, for convenient use with optim. """
-
-    def __init__(self, param):
-        super(SimpleModel, self).__init__()
-        self.update = torch.nn.Parameter(torch.rand(param.shape))
-        self.param = param
-
-    def forward(self):
-        return self.param + self.update
+        self.position_cur = jnp.where(collides, pos_after, pos)
+        self.velocity_cur = jnp.where(collides, vel_after, vel)
 
 
 if __name__ == "__main__":
@@ -180,32 +140,14 @@ if __name__ == "__main__":
             f"Arg --compare-every cannot be greater than or equal to {args.simsteps}."
         )
 
-    # Detect and report autograd anomalies
-    torch.autograd.set_detect_anomaly(True)
-
-    # Seed RNG for repeatability
-    torch.manual_seed(args.seed)
-
-    device = "cuda:0"
-
-    # # Hyperparams
-    # dtime = 0.1  # 1 / 30
-    # simsteps = 50
-    # seed = 123
-    # numepochs = 100
-    # compare_every = 10
-    # log = True
-    # logdir = Path("cache/bounce2d")
-
-    # Initialize the differentiable renderer.
-    renderer = SoftRenderer(camera_mode="look_at", device=device)
+    renderer = SoftRenderer(camera_mode="look_at")
     camera_distance = 15.0
     elevation = 0.0
     azimuth = 0.0
     renderer.set_eye_from_angles(camera_distance, elevation, azimuth)
 
     # GT parameters
-    position_initial_gt = torch.tensor([-7.5, 0.0], device=device)
+    position_initial_gt = jnp.array([-7.5, 0.0])
     radius_gt = 0.75
     speed_gt = 1.0
     height_gt = 5.0
@@ -217,21 +159,20 @@ if __name__ == "__main__":
         height=height_gt,
         speed=speed_gt,
         gravity=gravity_gt,
-        device=device,
     )
 
     sphere = TriangleMesh.from_obj(args.template)
     vertices_gt = meshutils.normalize_vertices(
-        sphere.vertices.unsqueeze(0), scale_factor=radius_gt
-    ).to(device)
-    faces = sphere.faces.to(device).unsqueeze(0)
-    textures_red = torch.cat(
+        sphere.vertices[None, :], scale_factor=radius_gt
+    )
+    faces = sphere.faces[None, :]
+    textures_red = jnp.concatenate(
         (
-            torch.ones(1, faces.shape[1], 2, 1, dtype=torch.float32, device=device),
-            torch.zeros(1, faces.shape[1], 2, 1, dtype=torch.float32, device=device),
-            torch.zeros(1, faces.shape[1], 2, 1, dtype=torch.float32, device=device),
+            jnp.ones((1, faces.shape[1], 2, 1), dtype=jnp.float32),
+            jnp.zeros((1, faces.shape[1], 2, 1), dtype=jnp.float32),
+            jnp.zeros((1, faces.shape[1], 2, 1), dtype=jnp.float32),
         ),
-        dim=-1,
+        axis=-1,
     )
 
     logdir = Path("cache/bounce2d") / args.expid
@@ -243,12 +184,11 @@ if __name__ == "__main__":
     print("Rendering GT images...")
     for t in trange(args.simsteps):
         ball2d_gt.step(args.dtime)
-        # traj.append((ball2d.position_cur[0].item(), ball2d.position_cur[1].item()))
         traj_gt.append(ball2d_gt.position_cur)
-        pos = torch.zeros(3, dtype=vertices_gt.dtype, device=device)
-        pos[0] = ball2d_gt.position_cur[0]
-        pos[1] = ball2d_gt.position_cur[1]
-        _vertices = vertices_gt.clone() + pos
+        pos = jnp.zeros(3, dtype=vertices_gt.dtype)
+        pos = pos.at[0].set(ball2d_gt.position_cur[0])
+        pos = pos.at[1].set(ball2d_gt.position_cur[1])
+        _vertices = vertices_gt + pos
         imgs_gt.append(renderer.forward(_vertices, faces, textures_red))
 
     if args.log:
@@ -257,75 +197,90 @@ if __name__ == "__main__":
         )
 
     # Parameters to estimate
-    speed_est = torch.nn.Parameter(
-        torch.tensor([3.0], device=device, requires_grad=True)
-    )
-    speedmodel = SimpleModel(speed_est).to(device)
+    speed_init = jnp.array([3.0], dtype=jnp.float32)
+    gravity_init = jnp.array([-10.0], dtype=jnp.float32)
 
-    gravity_est = torch.nn.Parameter(
-        torch.tensor([-10.0], device=device, requires_grad=True)
-    )
-    gravitymodel = SimpleModel(gravity_est).to(device)
+    params = {
+        "speed_update": jnp.zeros(1, dtype=jnp.float32),
+        "gravity_update": jnp.zeros(1, dtype=jnp.float32),
+    }
+    opt_state = _adam_init(params)
 
-    # Optimizer and loss function
-    # optimizer = torch.optim.SGD(
-    #     list(speedmodel.parameters()) + list(gravitymodel.parameters()), lr=1e-1
-    # )
-    optimizer = torch.optim.Adam(
-        list(speedmodel.parameters()) + list(gravitymodel.parameters()), lr=1e-1
-    )
-    lossfn = torch.nn.MSELoss()
-
-    for e in trange(args.epochs):
-        speed_cur = speedmodel()
-        gravity_cur = gravitymodel()
+    def loss_fn(params):
+        speed_cur = speed_init + params["speed_update"]
+        gravity_cur = gravity_init + params["gravity_update"]
         ball2d = BouncingBall2D(
             pos=position_initial_gt,
             radius=radius_gt,
             height=height_gt,
-            speed=speed_cur,
-            gravity=gravity_cur,
-            device=device,
+            speed=speed_cur[0],
+            gravity=gravity_cur[0],
         )
-        vertices_gt = meshutils.normalize_vertices(
-            sphere.vertices.unsqueeze(0), scale_factor=radius_gt
-        ).to(device)
-        traj_est = []
         imgs_est = []
         for t in range(args.simsteps):
             ball2d.step(args.dtime)
-            pos = torch.zeros(3, dtype=vertices_gt.dtype, device=device)
-            pos[0] = ball2d.position_cur[0]
-            pos[1] = ball2d.position_cur[1]
-            traj_est.append(ball2d.position_cur)
-            _vertices = vertices_gt.clone() + pos
+            pos = jnp.zeros(3, dtype=vertices_gt.dtype)
+            pos = pos.at[0].set(ball2d.position_cur[0])
+            pos = pos.at[1].set(ball2d.position_cur[1])
+            _vertices = vertices_gt + pos
             imgs_est.append(renderer.forward(_vertices, faces, textures_red))
-        # loss = sum(
-        #     [lossfn(est, gt) for est, gt in zip(traj_est[:: compare_every], traj_gt[:: compare_every])]
-        # ) / len(traj_est[:: compare_every])
-        loss = sum(
-            [
-                lossfn(est, gt)
-                for est, gt in zip(
-                    imgs_est[:: args.compare_every], imgs_gt[:: args.compare_every]
-                )
-            ]
+        return sum(
+            jnp.mean((est - gt) ** 2)
+            for est, gt in zip(
+                imgs_est[:: args.compare_every], imgs_gt[:: args.compare_every]
+            )
         ) / len(imgs_est[:: args.compare_every])
 
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
+    grad_fn = jax.value_and_grad(loss_fn)
+
+    for e in trange(args.epochs):
+        loss_val, grads = grad_fn(params)
+        params, opt_state = _adam_step(params, grads, opt_state, lr=1e-1)
+
+        speed_cur = speed_init + params["speed_update"]
+        gravity_cur = gravity_init + params["gravity_update"]
         tqdm.write(
-            f"Loss: {loss.item():.5f} "
-            f"Speed error: {(speed_cur - speed_gt).item():.5f} "
-            f"Gravity error: {(gravity_cur - gravity_gt).item():.5f}"
+            f"Loss: {float(loss_val):.5f} "
+            f"Speed error: {float(speed_cur[0] - speed_gt):.5f} "
+            f"Gravity error: {float(gravity_cur[0] - gravity_gt):.5f}"
         )
 
         if args.log and e == 0:
+            ball2d = BouncingBall2D(
+                pos=position_initial_gt,
+                radius=radius_gt,
+                height=height_gt,
+                speed=float(speed_cur[0]),
+                gravity=float(gravity_cur[0]),
+            )
+            imgs_est = []
+            for t in range(args.simsteps):
+                ball2d.step(args.dtime)
+                pos = jnp.zeros(3, dtype=vertices_gt.dtype)
+                pos = pos.at[0].set(ball2d.position_cur[0])
+                pos = pos.at[1].set(ball2d.position_cur[1])
+                _vertices = vertices_gt + pos
+                imgs_est.append(renderer.forward(_vertices, faces, textures_red))
             write_imglist_to_gif(
                 imgs_est, logdir / "init.gif", imgformat="rgba", verbose=False,
             )
-        if args.log and e == args.epochs - 1:
-            write_imglist_to_gif(
-                imgs_est, logdir / "opt.gif", imgformat="rgba", verbose=False,
-            )
+
+    if args.log:
+        ball2d = BouncingBall2D(
+            pos=position_initial_gt,
+            radius=radius_gt,
+            height=height_gt,
+            speed=float(speed_cur[0]),
+            gravity=float(gravity_cur[0]),
+        )
+        imgs_opt = []
+        for t in range(args.simsteps):
+            ball2d.step(args.dtime)
+            pos = jnp.zeros(3, dtype=vertices_gt.dtype)
+            pos = pos.at[0].set(ball2d.position_cur[0])
+            pos = pos.at[1].set(ball2d.position_cur[1])
+            _vertices = vertices_gt + pos
+            imgs_opt.append(renderer.forward(_vertices, faces, textures_red))
+        write_imglist_to_gif(
+            imgs_opt, logdir / "opt.gif", imgformat="rgba", verbose=False,
+        )

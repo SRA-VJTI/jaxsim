@@ -8,9 +8,12 @@ import time
 
 import imageio
 import numpy as np
-import torch
-import yaml
-from torch.utils.data import DataLoader
+import jax
+import jax.numpy as jnp
+try:
+    import yaml
+except ImportError:
+    yaml = None
 from tqdm import trange
 
 from gradsim.bodies import RigidBody
@@ -146,8 +149,8 @@ def define_props(
     # Init position
     init_pos = (
         [
-            (torch.rand(1).item() * init_x_scaling) + init_x_offset,
-            (torch.rand(1).item() * init_y_scaling) + init_y_offset,
+            (np.random.rand() * init_x_scaling) + init_x_offset,
+            (np.random.rand() * init_y_scaling) + init_y_offset,
             0,
         ]
         if random_init_pos
@@ -156,28 +159,28 @@ def define_props(
     # Orientation
     orientation = (
         [
-            1 + (torch.rand(1).item() * 2 - 1),
-            (torch.rand(1).item() * 2 - 1),
-            (torch.rand(1).item() * 2 - 1),
-            (torch.rand(1).item() * 2 - 1),
+            1 + (np.random.rand() * 2 - 1),
+            (np.random.rand() * 2 - 1),
+            (np.random.rand() * 2 - 1),
+            (np.random.rand() * 2 - 1),
         ]
         if random_orientation
         else [1.0, 0.0, 0.0, 0.0]
     )
     # Velocity
     linear_velocity = (
-        [(torch.rand(1).item() * 2 - 1) * 10, (torch.rand(1).item() * 2 - 1) * 2, 0]
+        [(np.random.rand() * 2 - 1) * 10, (np.random.rand() * 2 - 1) * 2, 0]
         if random_linear_velocity
         else [0.0, 0.0, 0.0]
     )
     angular_velocity = (
-        [(torch.rand(1).item() * 2 - 1) * 10, (torch.rand(1).item() * 2 - 1) * 2, 0]
+        [(np.random.rand() * 2 - 1) * 10, (np.random.rand() * 2 - 1) * 2, 0]
         if random_angular_velocity
         else [0.0, 0.0, 0.0]
     )
     # Force
     force_magnitude = (
-        max(0.0, default_force_magnitude + torch.randn(1).item()) if random_force_magnitude else default_force_magnitude
+        max(0.0, default_force_magnitude + np.random.randn()) if random_force_magnitude else default_force_magnitude
     )
     if random_force_direction:
         force_direction = np.random.rand(3) * 2 - 1
@@ -195,7 +198,7 @@ def define_props(
 
 
 def make_rigid_body(sample, init_pos, orientation, linear_velocity, angular_velocity,
-                    device, target_vertices=None):
+                    target_vertices=None):
     # Load a triangle mesh obj file
     if target_vertices is not None:
         tmp_obj_file = '/tmp/obj.obj'
@@ -204,40 +207,33 @@ def make_rigid_body(sample, init_pos, orientation, linear_velocity, angular_velo
         mesh = TriangleMesh.from_obj(tmp_obj_file)
     else:
         mesh = TriangleMesh.from_obj(sample.obj)
-    vertices = (
-        meshutils.normalize_vertices(mesh.vertices)
-        .unsqueeze(0)
-        .to(device)
-    )
-    faces = mesh.faces.unsqueeze(0).to(device)
-    textures = torch.cat(
+    vertices = meshutils.normalize_vertices(mesh.vertices)[None, :]
+    faces = mesh.faces[None, :]
+    textures = jnp.concatenate(
         (
             sample.color[0]
             / 255
-            * torch.ones(1, faces.shape[1], 2, 1, dtype=torch.float32, device=device),
+            * jnp.ones((1, faces.shape[1], 2, 1), dtype=jnp.float32),
             sample.color[1]
             / 255
-            * torch.ones(1, faces.shape[1], 2, 1, dtype=torch.float32, device=device),
+            * jnp.ones((1, faces.shape[1], 2, 1), dtype=jnp.float32),
             sample.color[2]
             / 255
-            * torch.ones(1, faces.shape[1], 2, 1, dtype=torch.float32, device=device),
+            * jnp.ones((1, faces.shape[1], 2, 1), dtype=jnp.float32),
         ),
-        dim=-1,
+        axis=-1,
     )
     # (Uniform) Masses
-    masses = (sample.mass / vertices.shape[-2]) * torch.nn.Parameter(
-        torch.ones(vertices.shape[-2], dtype=vertices.dtype, device=device),
-        requires_grad=True,
+    masses = (sample.mass / vertices.shape[-2]) * jnp.ones(
+        vertices.shape[-2], dtype=jnp.float32
     )
     # Body
     body = RigidBody(
         vertices[0],
-        position=torch.tensor(init_pos, dtype=torch.float32, device=device),
+        position=jnp.array(init_pos, dtype=jnp.float32),
         masses=masses,
-        orientation=torch.tensor(orientation).type(torch.float32).to(device),
+        orientation=jnp.array(orientation, dtype=jnp.float32),
         friction_coefficient=sample.fric,
-        # linear_velocity=torch.tensor(linear_velocity).type(torch.float32).to(device)
-        # angular_veloctiy=torch.tensor(angular_velocity).type(torch.float32).to(device)
     )
     return body, vertices, faces, textures
 
@@ -255,20 +251,20 @@ def render_samples(sim_steps, sim_dtime, render_every, restitution, renderer, bo
     if record_trajectory:
         poss, ornts, linvels, angvels = [], [], [], []
         def record(body):
-            poss.append(body.position.detach().cpu())
-            ornts.append(body.orientation.detach().cpu())
-            linvels.append(body.linear_velocity.detach().cpu())
-            angvels.append(body.angular_velocity.detach().cpu())
+            poss.append(np.array(body.position))
+            ornts.append(np.array(body.orientation))
+            linvels.append(np.array(body.linear_velocity))
+            angvels.append(np.array(body.angular_velocity))
     for t in trange(sim_steps, leave=False):
         sim.step()
         if t % render_every == 0:
             if record_trajectory:
                 record(body)
-            rgba = renderer.forward(body.get_world_vertices().unsqueeze(0), faces, textures)
-            img = (rgba[0].permute(1, 2, 0).detach().cpu().numpy() * 255).astype(np.uint8)
+            rgba = renderer.forward(body.get_world_vertices()[None, :], faces, textures)
+            img = (np.array(rgba[0]).transpose(1, 2, 0) * 255).astype(np.uint8)
             sequence.append(img)
     if record_trajectory:
-        f = lambda v: torch.stack(v).numpy()
+        def f(v): return np.array(v)
         return sequence, f(poss), f(ornts), f(linvels), f(angvels)
     else:
         return sequence
@@ -297,7 +293,6 @@ def copy_scripts(src, dst):
             if os.path.abspath(d) in os.path.abspath(dst):
                 continue
             print("Copying", d)
-            # shutil.copytree(d, os.path.join(dst, d))
             new_dir = os.path.join(dst, os.path.basename(os.path.normpath(d)))
             copy_scripts(d, new_dir)
 
@@ -306,13 +301,9 @@ if __name__ == "__main__":
 
     args = get_args()
 
-    # Device to store tensors on (MUST be CUDA-capable, for renderer to work).
-    device = f"cuda:{args.gpu}"
-
     # Seed random number generators
     random.seed(args.seed)
     np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
 
     # Initialize h5
     h5_maker = (
@@ -328,12 +319,6 @@ if __name__ == "__main__":
 
     # Save args
     if not args.debug:
-        # copy_scripts(
-        #     os.path.abspath(
-        #         os.path.join(os.path.dirname(os.path.abspath(__file__)), "../gradsim")
-        #     ),
-        #     os.path.join(args.out_dir, "gradsim"),
-        # )
         shutil.copy(os.path.abspath(__file__), args.out_dir)
         os.makedirs(os.path.join(args.out_dir, "obj"), exist_ok=True)
         for obj in glob.glob(os.path.join(args.data_dir, "*.obj")):
@@ -343,7 +328,7 @@ if __name__ == "__main__":
 
     # Initialize the renderer.
     renderer = SoftRenderer(
-        image_size=args.image_size, camera_mode=args.camera_mode, device=device
+        image_size=args.image_size, camera_mode=args.camera_mode
     )
     renderer.set_eye_from_angles(args.camera_distance, args.elevation, args.azimuth)
 
@@ -363,15 +348,6 @@ if __name__ == "__main__":
             volume = 0.0
             while volume < args.volume_thresh:
 
-                # Sample
-                # def s():
-                #     sample = prim_gen.sample()
-                #     if sample.shape._value_ == 1:
-                #         print("returning")
-                #         return sample
-                #     else:
-                #         return s()
-                # sample = s()
                 sample = prim_gen.sample()
 
                 # Define props
@@ -400,33 +376,27 @@ if __name__ == "__main__":
                 # Body
                 body, vertices, faces, textures = make_rigid_body(
                     sample, init_pos, orientation, linear_velocity, angular_velocity,
-                    device, args.target_vertices
+                    args.target_vertices
                 )
 
-                volume = (vertices[0].max(0)[0] - vertices[0].min(0)[0]).norm().item()
+                volume = float(jnp.linalg.norm(
+                    vertices[0].max(axis=0) - vertices[0].min(axis=0)
+                ))
                 if args.debug:
                     print("Volume:", volume)
 
             # Impulse application points
-            # application_points = [0, 1]
-            # application_points = [
-            #     int(v)
-            #     for v in torch.randint(
-            #         vertices.shape[1], (max(1, torch.randint(vertices.shape[1], (1,))),)
-            #     )
-            # ]
-            inds = vertices.argmin(1)
-            application_points = list(inds.view(-1).detach().cpu().numpy())
+            inds = jnp.argmin(vertices, axis=1)
+            application_points = list(np.array(inds).flatten())
             application_points = [application_points[1]]
 
             # Add an impulse
             if impulse_magnitude > 0:
                 impulse = ConstantForce(
                     magnitude=impulse_magnitude,
-                    direction=torch.from_numpy(impulse_direction),
+                    direction=jnp.array(impulse_direction),
                     starttime=0.0,
                     endtime=0.1,
-                    device=device,
                 )
                 body.add_external_force(impulse, application_points=application_points)
 
@@ -434,12 +404,11 @@ if __name__ == "__main__":
             if args.gravity:
                 gravity = ConstantForce(
                     magnitude=args.gravity_magnitude / len(vertices[0]),
-                    direction=torch.tensor([0, -1, 0]),
-                    device=device,
+                    direction=jnp.array([0, -1, 0]),
                 )
                 body.add_external_force(gravity)
 
-            # Make sequence 
+            # Make sequence
             sequence = render_samples(
                 sim_steps=args.sim_steps,
                 sim_dtime=args.sim_dtime,
@@ -502,36 +471,14 @@ if __name__ == "__main__":
 
     # Load 10 samples of only sequences
     h5_ds = HDF5Dataset(args.out_dir, read_only_seqs=True)
-    h5_dl = DataLoader(
-        h5_ds, batch_size=10, shuffle=True, collate_fn=h5_ds.HDF5_collate_fn
-    )
     s = time.time()
-    seqs = next(iter(h5_dl))
+    seqs = next(iter(h5_ds))
     e = time.time()
     print(e - s)
 
-# Load 10 samples
-h5_ds = HDF5Dataset(args.out_dir)
-h5_dl = DataLoader(
-    h5_ds, batch_size=10, shuffle=True, collate_fn=h5_ds.HDF5_collate_fn
-)
-s = time.time()
-out = next(iter(h5_dl))
-e = time.time()
-print(e - s)
-(
-    seqs,
-    shape,
-    position,
-    orientation,
-    mass,
-    fric,
-    elas,
-    color,
-    scale,
-    force_application_points,
-    force_magnitude,
-    force_direction,
-    linear_velocity,
-    angular_velocity,
-) = out
+    # Load 10 samples
+    h5_ds2 = HDF5Dataset(args.out_dir)
+    s = time.time()
+    out = next(iter(h5_ds2))
+    e = time.time()
+    print(e - s)

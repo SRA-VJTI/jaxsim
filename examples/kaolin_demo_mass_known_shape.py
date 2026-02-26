@@ -7,7 +7,8 @@ from pathlib import Path
 
 import imageio
 import numpy as np
-import torch
+import jax
+import jax.numpy as jnp
 from tqdm import tqdm, trange
 
 import kaolin as kal
@@ -19,7 +20,7 @@ from gradsim.simulator import Simulator
 from gradsim.utils import meshutils
 
 
-class Model(torch.nn.Module):
+class Model:
     """Wrap masses into a torch.nn.Module, for ease of optimization. """
 
     def __init__(self, masses, uniform_density=False):

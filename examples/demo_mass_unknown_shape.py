@@ -7,7 +7,8 @@ from pathlib import Path
 
 import imageio
 import numpy as np
-import torch
+import jax
+import jax.numpy as jnp
 from tqdm import tqdm, trange
 
 from gradsim.bodies import RigidBody
@@ -17,32 +18,22 @@ from gradsim.simulator import Simulator
 from gradsim.utils import meshutils
 
 
-class VertexModel(torch.nn.Module):
-    """Wrap vertices into a torch.nn.Module, for optimization ease. """
-
-    def __init__(self, vertices):
-        super(VertexModel, self).__init__()
-        self.update = torch.nn.Parameter(torch.rand(vertices.shape) * 0.001)
-        self.vertices = vertices
-
-    def forward(self):
-        return self.vertices + self.update
+def _adam_init(params):
+    return {k: {"m": jnp.zeros_like(v), "v": jnp.zeros_like(v), "t": 0}
+            for k, v in params.items()}
 
 
-class MassModel(torch.nn.Module):
-    """Wrap masses into a torch.nn.Module, for ease of optimization. """
-
-    def __init__(self, masses, uniform_density=False):
-        super(MassModel, self).__init__()
-        self.update = None
-        if uniform_density:
-            self.update = torch.nn.Parameter(torch.rand(1) * 0.1)
-        else:
-            self.update = torch.nn.Parameter(torch.rand(masses.shape) * 0.1)
-        self.masses = masses
-
-    def forward(self):
-        return torch.nn.functional.relu(self.masses + self.update)
+def _adam_step(params, grads, state, lr, beta1=0.5, beta2=0.99, eps=1e-8):
+    new_params, new_state = {}, {}
+    for k in params:
+        t = state[k]["t"] + 1
+        m = beta1 * state[k]["m"] + (1 - beta1) * grads[k]
+        v = beta2 * state[k]["v"] + (1 - beta2) * grads[k] ** 2
+        m_hat = m / (1 - beta1 ** t)
+        v_hat = v / (1 - beta2 ** t)
+        new_params[k] = params[k] - lr * m_hat / (jnp.sqrt(v_hat) + eps)
+        new_state[k] = {"m": m, "v": v, "t": t}
+    return new_params, new_state
 
 
 if __name__ == "__main__":
@@ -119,47 +110,32 @@ if __name__ == "__main__":
             f"Arg --compare-every cannot be greater than or equal to {args.simsteps}."
         )
 
-    # Seed RNG for repeatability.
-    torch.manual_seed(args.seed)
-
-    # Device to store tensors on (MUST be CUDA-capable, for renderer to work).
-    device = "cuda:0"
-
-    # Load a body (from a triangle mesh obj file).
+    # Load GT body (from a triangle mesh obj file).
     mesh_gt = TriangleMesh.from_obj(args.infile)
-    vertices_gt = meshutils.normalize_vertices(mesh_gt.vertices.unsqueeze(0)).to(device)
-    faces_gt = mesh_gt.faces.to(device).unsqueeze(0)
-    textures_gt = torch.cat(
+    vertices_gt = meshutils.normalize_vertices(mesh_gt.vertices[None, :])
+    faces_gt = mesh_gt.faces[None, :]
+    textures_gt = jnp.concatenate(
         (
-            torch.ones(1, faces_gt.shape[1], 2, 1, dtype=torch.float32, device=device),
-            torch.ones(1, faces_gt.shape[1], 2, 1, dtype=torch.float32, device=device),
-            torch.zeros(1, faces_gt.shape[1], 2, 1, dtype=torch.float32, device=device),
+            jnp.ones((1, faces_gt.shape[1], 2, 1), dtype=jnp.float32),
+            jnp.ones((1, faces_gt.shape[1], 2, 1), dtype=jnp.float32),
+            jnp.zeros((1, faces_gt.shape[1], 2, 1), dtype=jnp.float32),
         ),
-        dim=-1,
+        axis=-1,
     )
     mass_per_vertex = 1.0 / vertices_gt.shape[1]
-    masses_gt = torch.nn.Parameter(
-        mass_per_vertex
-        * torch.ones(vertices_gt.shape[1], dtype=vertices_gt.dtype, device=device),
-        requires_grad=False,
-    )
+    masses_gt = mass_per_vertex * jnp.ones(vertices_gt.shape[1], dtype=jnp.float32)
     body_gt = RigidBody(vertices_gt[0], masses=masses_gt)
 
-    # Create a force that applies gravity (g = 10 metres / second^2).
     gravity = ConstantForce(
-        direction=torch.tensor([0.0, -1.0, 0.0]),
+        direction=jnp.array([0.0, -1.0, 0.0]),
         magnitude=args.force_magnitude,
-        device=device,
     )
 
-    # Add this force to the body.
     body_gt.add_external_force(gravity, application_points=[0, 1])
 
-    # Initialize the simulator with the body at the origin.
     sim_gt = Simulator([body_gt])
 
-    # Initialize the renderer.
-    renderer = SoftRenderer(camera_mode="look_at", device=device)
+    renderer = SoftRenderer(camera_mode="look_at")
     camera_distance = 8.0
     elevation = 30.0
     azimuth = 0.0
@@ -167,139 +143,128 @@ if __name__ == "__main__":
 
     img_gt = []
 
-    # Run the simulation.
-    # writer = imageio.get_writer(outfile, mode="I")
     for i in trange(args.simsteps):
         sim_gt.step()
-        # print("Body is at:", body.position)
         rgba = renderer.forward(
-            body_gt.get_world_vertices().unsqueeze(0), faces_gt, textures_gt
+            body_gt.get_world_vertices()[None, :], faces_gt, textures_gt
         )
         img_gt.append(rgba)
-    #     writer.append_data((255 * img).astype(np.uint8))
-    # writer.close()
 
     # Load the template mesh (usually a sphere).
     mesh = TriangleMesh.from_obj(args.template)
-    vertices = meshutils.normalize_vertices(mesh.vertices.unsqueeze(0)).to(device)
-    faces = mesh.faces.to(device).unsqueeze(0)
-    textures = torch.cat(
+    vertices = meshutils.normalize_vertices(mesh.vertices[None, :])
+    faces = mesh.faces[None, :]
+    textures = jnp.concatenate(
         (
-            torch.ones(1, faces.shape[1], 2, 1, dtype=torch.float32, device=device),
-            torch.ones(1, faces.shape[1], 2, 1, dtype=torch.float32, device=device),
-            torch.zeros(1, faces.shape[1], 2, 1, dtype=torch.float32, device=device),
+            jnp.ones((1, faces.shape[1], 2, 1), dtype=jnp.float32),
+            jnp.ones((1, faces.shape[1], 2, 1), dtype=jnp.float32),
+            jnp.zeros((1, faces.shape[1], 2, 1), dtype=jnp.float32),
         ),
-        dim=-1,
+        axis=-1,
     )
 
-    mass_per_vertex = 0.5 / vertices.shape[1]
-    masses_est = torch.nn.Parameter(
-        mass_per_vertex
-        * torch.ones(vertices.shape[1], dtype=vertices.dtype, device=device),
-        requires_grad=False,
-    )
-    massmodel = MassModel(masses_est, uniform_density=args.uniform_density)
-    massmodel.to(device)
-    optimizer = torch.optim.Adam(massmodel.parameters(), lr=5e-1)
-    # optimizer = torch.optim.SGD(model.parameters(), lr=1e1, momentum=0.9)
-    lossfn = torch.nn.MSELoss()
-    img_est = None  # Create a placeholder here, for global scope (useful in logging)
+    mass_per_vertex_est = 0.5 / vertices.shape[1]
+    masses_est = mass_per_vertex_est * jnp.ones(vertices.shape[1], dtype=jnp.float32)
+
+    # Phase 1: mass optimization
+    if args.uniform_density:
+        params_mass = {"update": jnp.zeros(1, dtype=jnp.float32)}
+    else:
+        params_mass = {"update": jnp.zeros(masses_est.shape, dtype=jnp.float32)}
+    opt_state_mass = _adam_init(params_mass)
+
     masslosses = []
     est_masses = None
     initial_imgs = []
-    initial_masses = None
-    massmodel.train()
-    for i in trange(args.massepochs):
-        masses_cur = massmodel()
+
+    def mass_loss_fn(params_m):
+        if args.uniform_density:
+            masses_cur = jnp.maximum(masses_est + params_m["update"], 0.0).repeat(vertices.shape[1])
+        else:
+            masses_cur = jnp.maximum(masses_est + params_m["update"], 0.0)
         body = RigidBody(vertices[0], masses=masses_cur)
         body.add_external_force(gravity, application_points=[0, 1])
         sim_est = Simulator([body])
-        img_est = []
+        img_est_inner = []
         for t in range(args.simsteps):
             sim_est.step()
             rgba = renderer.forward(
-                body.get_world_vertices().unsqueeze(0), faces, textures
+                body.get_world_vertices()[None, :], faces, textures
             )
-            img_est.append(rgba)
-            if i == 0:
-                initial_imgs.append(rgba)  # To log initial guess.
-        loss = sum(
-            [
-                lossfn(est, gt)
-                for est, gt in zip(
-                    img_est[:: args.compare_every], img_gt[:: args.compare_every]
-                )
-            ]
-        ) / (len(img_est[:: args.compare_every]))
-        tqdm.write(f"Mass Loss: {loss.item():.5f}, Mass (est): {masses_cur.mean():.5f}")
-        # tqdm.write(f"Mass (GT): {masses_gt.mean():.5f}")
-        masslosses.append(loss.item())
-        est_masses = masses_est.clone().detach().cpu().numpy()
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
-        if i == 40 or i == 80:
-            for param_group in optimizer.param_groups:
-                param_group["lr"] = param_group["lr"] * 0.5
+            img_est_inner.append(rgba)
+        return sum(
+            jnp.mean((est - gt) ** 2)
+            for est, gt in zip(
+                img_est_inner[:: args.compare_every], img_gt[:: args.compare_every]
+            )
+        ) / len(img_est_inner[:: args.compare_every])
 
-    massmodel.eval()
-    shapemodel = VertexModel(vertices)
-    shapemodel.to(device)
+    mass_grad_fn = jax.value_and_grad(mass_loss_fn)
+
+    for i in trange(args.massepochs):
+        loss_val, grads = mass_grad_fn(params_mass)
+        lr = 5e-1
+        if i >= 80:
+            lr = 5e-1 * 0.25
+        elif i >= 40:
+            lr = 5e-1 * 0.5
+        params_mass, opt_state_mass = _adam_step(params_mass, grads, opt_state_mass, lr=lr)
+
+        if args.uniform_density:
+            masses_cur = jnp.maximum(masses_est + params_mass["update"], 0.0).repeat(vertices.shape[1])
+        else:
+            masses_cur = jnp.maximum(masses_est + params_mass["update"], 0.0)
+
+        tqdm.write(f"Mass Loss: {float(loss_val):.5f}, Mass (est): {float(masses_cur.mean()):.5f}")
+        masslosses.append(float(loss_val))
+        est_masses = np.array(masses_cur)
+
+    # Phase 2: shape optimization
+    params_shape = {"update": jnp.zeros(vertices.shape, dtype=jnp.float32)}
+    opt_state_shape = _adam_init(params_shape)
     shapelosses = []
-    # optimizer = torch.optim.SGD(shapemodel.parameters(), lr=1e1, momentum=0.9)
-    optimizer = torch.optim.Adam(shapemodel.parameters(), lr=1e-2)
-    for i in trange(args.shapeepochs):
-        masses_cur = massmodel()
-        vertices_cur = shapemodel()
-        body = RigidBody(vertices_cur[0], masses=masses_cur)
+
+    if args.uniform_density:
+        masses_final = jnp.maximum(masses_est + params_mass["update"], 0.0).repeat(vertices.shape[1])
+    else:
+        masses_final = jnp.maximum(masses_est + params_mass["update"], 0.0)
+
+    def shape_loss_fn(params_s):
+        vertices_cur = vertices + params_s["update"]
+        body = RigidBody(vertices_cur[0], masses=masses_final)
         body.add_external_force(gravity, application_points=[0, 1])
         sim_est = Simulator([body])
-        img_est = []
+        img_est_inner = []
         for t in range(args.simsteps):
             sim_est.step()
             rgba = renderer.forward(
-                body.get_world_vertices().unsqueeze(0), faces, textures
+                body.get_world_vertices()[None, :], faces, textures
             )
-            img_est.append(rgba)
-        loss = sum(
-            [
-                lossfn(est, gt)
-                for est, gt in zip(
-                    img_est[:: args.compare_every], img_gt[:: args.compare_every]
-                )
-            ]
-        ) / len(img_est[:: args.compare_every])
+            img_est_inner.append(rgba)
+        return sum(
+            jnp.mean((est - gt) ** 2)
+            for est, gt in zip(
+                img_est_inner[:: args.compare_every], img_gt[:: args.compare_every]
+            )
+        ) / len(img_est_inner[:: args.compare_every])
+
+    shape_grad_fn = jax.value_and_grad(shape_loss_fn)
+
+    for i in trange(args.shapeepochs):
+        loss_val, grads = shape_grad_fn(params_shape)
+        params_shape, opt_state_shape = _adam_step(params_shape, grads, opt_state_shape, lr=1e-2)
         tqdm.write(
-            f"Shape Loss: {loss.item():.5f}, Mass (est): {masses_cur.mean():.5f}"
+            f"Shape Loss: {float(loss_val):.5f}, Mass (est): {float(masses_final.mean()):.5f}"
         )
-        shapelosses.append(loss.item())
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
+        shapelosses.append(float(loss_val))
 
     # Save viz, if specified.
     if args.log:
         logdir = Path(args.logdir) / args.expid
         logdir.mkdir(exist_ok=True)
 
-        # GT sim, Est sim
-        initwriter = imageio.get_writer(logdir / "init.gif", mode="I")
-        gtwriter = imageio.get_writer(logdir / "gt.gif", mode="I")
-        estwriter = imageio.get_writer(logdir / "est.gif", mode="I")
-        for gtimg, estimg, initimg in zip(img_gt, img_est, initial_imgs):
-            gtimg = gtimg[0].permute(1, 2, 0).detach().cpu().numpy()
-            estimg = estimg[0].permute(1, 2, 0).detach().cpu().numpy()
-            initimg = initimg[0].permute(1, 2, 0).detach().cpu().numpy()
-            gtwriter.append_data((255 * gtimg).astype(np.uint8))
-            estwriter.append_data((255 * estimg).astype(np.uint8))
-            initwriter.append_data((255 * initimg).astype(np.uint8))
-        gtwriter.close()
-        estwriter.close()
-        initwriter.close()
-
-        # Write metrics.
         np.savetxt(logdir / "masslosses.txt", masslosses)
         np.savetxt(logdir / "shapelosses.txt", shapelosses)
         np.savetxt(logdir / "masses.txt", est_masses)
-        shape = shapemodel()[0].detach().cpu().numpy()
+        shape = np.array((vertices + params_shape["update"])[0])
         np.savetxt(logdir / "shape.txt", shape)

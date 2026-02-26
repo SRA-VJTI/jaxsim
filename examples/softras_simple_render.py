@@ -5,7 +5,8 @@ from pathlib import Path
 
 import imageio
 import numpy as np
-import torch
+import jax
+import jax.numpy as jnp
 from tqdm import trange
 
 from gradsim.renderutils import SoftRenderer, TriangleMesh
@@ -27,13 +28,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Initialize the soft rasterizer.
-    renderer = SoftRenderer(camera_mode="look_at", device="cuda:0")
+    renderer = SoftRenderer(camera_mode="look_at")
 
     # Camera settings.
-    camera_distance = (
-        2.0  # Distance of the camera from the origin (i.e., center of the object).
-    )
-    elevation = 30.0  # Angle of elevation
+    camera_distance = 2.0
+    elevation = 30.0
 
     # Directory in which sample data is located.
     DATA_DIR = Path(__file__).parent / "sampledata"
@@ -43,29 +42,27 @@ if __name__ == "__main__":
 
     # Output filename (to write out a rendered .gif to).
     outfile = "cache/softras_render.gif"
+    Path("cache").mkdir(exist_ok=True)
 
-    # Extract the vertices, faces, and texture the mesh (currently color with white).
-    vertices = mesh.vertices
-    faces = mesh.faces
-    vertices = vertices[None, :, :].cuda()
-    faces = faces[None, :, :].cuda()
+    # Extract the vertices, faces, and texture the mesh (currently color with yellow).
+    vertices = mesh.vertices[None, :, :]
+    faces = mesh.faces[None, :, :]
     # Initialize all faces to yellow (to color the banana)!
-    textures = torch.cat(
-        (
-            torch.ones(1, faces.shape[1], 2, 1, dtype=torch.float32, device="cuda:0"),
-            torch.ones(1, faces.shape[1], 2, 1, dtype=torch.float32, device="cuda:0"),
-            torch.zeros(1, faces.shape[1], 2, 1, dtype=torch.float32, device="cuda:0"),
-        ),
-        dim=-1,
+    textures = jnp.concatenate(
+        [
+            jnp.ones((1, faces.shape[1], 2, 1), dtype=jnp.float32),
+            jnp.ones((1, faces.shape[1], 2, 1), dtype=jnp.float32),
+            jnp.zeros((1, faces.shape[1], 2, 1), dtype=jnp.float32),
+        ],
+        axis=-1,
     )
 
-    # Translate the mesh such that its centered at the origin.
+    # Translate the mesh such that it is centered at the origin.
     vertices_max = vertices.max()
     vertices_min = vertices.min()
     vertices_middle = (vertices_max + vertices_min) / 2.0
     vertices = vertices - vertices_middle
     # Scale the vertices slightly (so that they occupy a sizeable image area).
-    # Skip if using models other than the banana.obj file.
     coef = 5
     vertices = vertices * coef
 
@@ -75,10 +72,9 @@ if __name__ == "__main__":
         writer = imageio.get_writer(outfile, mode="I")
     for azimuth in trange(0, 360, args.stride):
         renderer.set_eye_from_angles(camera_distance, elevation, azimuth)
-        # Render an image.
         rgba = renderer.forward(vertices, faces, textures)
         if not args.no_viz:
-            img = rgba[0].permute(1, 2, 0).detach().cpu().numpy()
+            img = np.array(rgba[0]).transpose(1, 2, 0)
             writer.append_data((255 * img).astype(np.uint8))
     if not args.no_viz:
         writer.close()

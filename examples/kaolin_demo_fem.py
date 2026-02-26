@@ -4,7 +4,8 @@ import math
 import os
 
 import numpy as np
-import torch
+import jax
+import jax.numpy as jnp
 from tqdm import trange
 
 from argparsers import get_dflex_base_parser
@@ -33,7 +34,7 @@ def read_tet_mesh(filepath):
     return vertices, faces
 
 
-class SimpleModel(torch.nn.Module):
+class SimpleModel:
     """A thin wrapper around a parameter, for convenient use with optim. """
 
     def __init__(self, param, activation=None):

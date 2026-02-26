@@ -2,13 +2,23 @@ import argparse
 import glob
 import imageio
 import numpy as np
-import open3d as o3d    # Import before torch
+try:
+    import open3d as o3d
+except ImportError:
+    o3d = None
 import os
 import time
-import torch
-import vapeplot
+import jax
+import jax.numpy as jnp
+try:
+    import vapeplot
+except ImportError:
+    vapeplot = None
 
-from natsort import natsorted
+try:
+    from natsort import natsorted
+except ImportError:
+    natsorted = sorted
 from tqdm import tqdm, trange
 
 from gradsim.utils.logging import write_imglist_to_dir, write_imglist_to_gif
@@ -45,24 +55,15 @@ if __name__ == "__main__":
 
     args = get_args()
 
-    device = "cuda:0"
-
     gt_files = natsorted(glob.glob(os.path.join(args.data_dir, "[!faces]*.txt")))
     faces = np.loadtxt(os.path.join(args.data_dir, "faces.txt"))
-    # faces = torch.from_numpy(faces).long().to(device)
-    textures = torch.cat(
+    textures = jnp.concatenate(
         (
-            torch.zeros(
-                1, faces.shape[-2], 2, 1, dtype=torch.float32, device=device
-            ),
-            torch.zeros(
-                1, faces.shape[-2], 2, 1, dtype=torch.float32, device=device
-            ),
-            torch.zeros(
-                1, faces.shape[-2], 2, 1, dtype=torch.float32, device=device
-            ),
+            jnp.zeros((1, faces.shape[-2], 2, 1), dtype=jnp.float32),
+            jnp.zeros((1, faces.shape[-2], 2, 1), dtype=jnp.float32),
+            jnp.zeros((1, faces.shape[-2], 2, 1), dtype=jnp.float32),
         ),
-        dim=-1,
+        axis=-1,
     )
     # faces = faces.detach().cpu().numpy()
     f = o3d.utility.Vector3iVector(faces)
