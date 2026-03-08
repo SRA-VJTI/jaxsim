@@ -16,15 +16,15 @@ except ImportError:
     yaml = None
 from tqdm import trange
 
-from gradsim.bodies import RigidBody
-from gradsim.forces import ConstantForce
-from gradsim.generator import PrimitiveGenerator
-from gradsim.renderutils import SoftRenderer, TriangleMesh
-from gradsim.simulator import Simulator
-from gradsim.utils import meshutils
-from gradsim.utils.defaults import Defaults
-from gradsim.utils.h5 import HDF5Dataset, HDF5Maker
-from gradsim.engines import EulerIntegrator, SemiImplicitEulerWithContacts
+from jaxsim.bodies import RigidBody
+from jaxsim.forces import ConstantForce
+from jaxsim.generator import PrimitiveGenerator
+from jaxsim.renderutils import SoftRenderer, TriangleMesh
+from jaxsim.simulator import Simulator
+from jaxsim.utils import meshutils
+from jaxsim.utils.defaults import Defaults
+from jaxsim.utils.h5 import HDF5Dataset, HDF5Maker
+from jaxsim.engines import EulerIntegrator, SemiImplicitEulerWithContacts
 
 
 def get_args():

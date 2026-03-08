@@ -11,10 +11,10 @@ import jax.numpy as jnp
 from jax.experimental.ode import odeint
 from tqdm import tqdm, trange
 
-from gradsim.bodies import DoublePendulum
-from gradsim.renderutils import SoftRenderer, TriangleMesh
-from gradsim.utils import meshutils
-from gradsim.utils.logging import write_imglist_to_gif
+from jaxsim.bodies import DoublePendulum
+from jaxsim.renderutils import SoftRenderer, TriangleMesh
+from jaxsim.utils import meshutils
+from jaxsim.utils.logging import write_imglist_to_gif
 
 
 def _adam_init(params):

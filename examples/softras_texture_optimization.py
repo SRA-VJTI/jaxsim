@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 from tqdm import tqdm, trange
 
-from gradsim.renderutils import SoftRenderer, TriangleMesh
+from jaxsim.renderutils import SoftRenderer, TriangleMesh
 
 # Example script that uses SoftRas to optimize the texture for a given mesh.
 

@@ -21,7 +21,7 @@ except ImportError:
     natsorted = sorted
 from tqdm import tqdm, trange
 
-from gradsim.utils.logging import write_imglist_to_dir, write_imglist_to_gif
+from jaxsim.utils.logging import write_imglist_to_dir, write_imglist_to_gif
 from image_blend import blend_images
 
 

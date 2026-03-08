@@ -1,10 +1,10 @@
 import jax.numpy as jnp
 
-from gradsim.bodies import RigidBody
-from gradsim.engines import (EulerIntegratorWithContacts,
+from jaxsim.bodies import RigidBody
+from jaxsim.engines import (EulerIntegratorWithContacts,
                               SemiImplicitEulerWithContacts)
-from gradsim.forces import ConstantForce
-from gradsim.simulator import Simulator
+from jaxsim.forces import ConstantForce
+from jaxsim.simulator import Simulator
 
 if __name__ == "__main__":
 

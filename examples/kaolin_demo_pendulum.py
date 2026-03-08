@@ -13,10 +13,10 @@ from tqdm import tqdm, trange
 
 import kaolin
 
-from gradsim.bodies import SimplePendulum
-from gradsim.renderutils import SoftRenderer
-from gradsim.utils import meshutils
-from gradsim.utils.logging import write_imglist_to_gif
+from jaxsim.bodies import SimplePendulum
+from jaxsim.renderutils import SoftRenderer
+from jaxsim.utils import meshutils
+from jaxsim.utils.logging import write_imglist_to_gif
 
 
 class SimpleModel:

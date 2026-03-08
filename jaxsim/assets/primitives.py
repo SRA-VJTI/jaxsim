@@ -1,7 +1,7 @@
 import os
 from enum import Enum
 
-from gradsim.assets import ASSET_DIR
+from jaxsim.assets import ASSET_DIR
 
 
 class Primitive(Enum):

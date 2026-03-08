@@ -10,9 +10,9 @@ import jax.numpy as jnp
 import tqdm
 from PIL import Image
 
-from gradsim.renderutils import TriangleMesh
-from gradsim.renderutils.dibr.renderer import Renderer as DIBRenderer
-from gradsim.renderutils.dibr.utils.sphericalcoord import get_spherical_coords_x
+from jaxsim.renderutils import TriangleMesh
+from jaxsim.renderutils.dibr.renderer import Renderer as DIBRenderer
+from jaxsim.renderutils.dibr.utils.sphericalcoord import get_spherical_coords_x
 
 
 def main():

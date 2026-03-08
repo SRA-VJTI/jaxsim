@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 from tqdm import trange
 
-from gradsim import dflex as df
+from jaxsim import dflex as df
 
 
 def _adam_init(params):
@@ -29,8 +29,8 @@ def _adam_step(params, grads, state, lr, beta1=0.5, beta2=0.99, eps=1e-8):
 
 if __name__ == "__main__":
 
-    from gradsim.renderutils import SoftRenderer
-    from gradsim.utils.logging import write_imglist_to_gif
+    from jaxsim.renderutils import SoftRenderer
+    from jaxsim.utils.logging import write_imglist_to_gif
 
     sim_duration = 1.5  # seconds
     sim_substeps = 32
@@ -38,13 +38,21 @@ if __name__ == "__main__":
     sim_steps = int(sim_duration / sim_dt)
     sim_time = 0.0
 
-    renderer = SoftRenderer(camera_mode="look_at")
+    renderer = SoftRenderer(
+        camera_mode="look_at",
+        bg_color=[0.9, 0.9, 0.9],
+        light_intensity_ambient=0.3,
+        light_intensity_directional=0.7,
+        light_direction=[0.5, 1.0, -0.5],
+        light_color_directional=[1.0, 0.98, 0.95],
+        light_color_ambient=[0.6, 0.7, 1.0],
+    )
     camera_distance = 5.0
-    elevation = 0.0
-    azimuth = 0.0
+    elevation = 25.0
+    azimuth = 30.0
     renderer.set_eye_from_angles(camera_distance, elevation, azimuth)
 
-    render_steps = 60 * 4
+    render_steps = 16
 
     height = 1.5
 
@@ -109,9 +117,9 @@ if __name__ == "__main__":
     faces = model.tri_indices
     textures = jnp.concatenate(
         (
-            jnp.ones((1, faces.shape[-2], 2, 1), dtype=jnp.float32),
-            jnp.ones((1, faces.shape[-2], 2, 1), dtype=jnp.float32),
-            jnp.zeros((1, faces.shape[-2], 2, 1), dtype=jnp.float32),
+            jnp.ones((1, faces.shape[-2], 2, 1), dtype=jnp.float32) * 0.95,
+            jnp.ones((1, faces.shape[-2], 2, 1), dtype=jnp.float32) * 0.90,
+            jnp.ones((1, faces.shape[-2], 2, 1), dtype=jnp.float32) * 0.82,
         ),
         axis=-1,
     )
@@ -190,9 +198,9 @@ if __name__ == "__main__":
         faces2 = model2.tri_indices
         textures2 = jnp.concatenate(
             (
-                jnp.ones((1, faces2.shape[-2], 2, 1), dtype=jnp.float32),
-                jnp.ones((1, faces2.shape[-2], 2, 1), dtype=jnp.float32),
-                jnp.zeros((1, faces2.shape[-2], 2, 1), dtype=jnp.float32),
+                jnp.ones((1, faces2.shape[-2], 2, 1), dtype=jnp.float32) * 0.95,
+                jnp.ones((1, faces2.shape[-2], 2, 1), dtype=jnp.float32) * 0.90,
+                jnp.ones((1, faces2.shape[-2], 2, 1), dtype=jnp.float32) * 0.82,
             ),
             axis=-1,
         )
@@ -245,9 +253,9 @@ if __name__ == "__main__":
             faces3 = model3.tri_indices
             textures3 = jnp.concatenate(
                 (
-                    jnp.ones((1, faces3.shape[-2], 2, 1), dtype=jnp.float32),
-                    jnp.ones((1, faces3.shape[-2], 2, 1), dtype=jnp.float32),
-                    jnp.zeros((1, faces3.shape[-2], 2, 1), dtype=jnp.float32),
+                    jnp.ones((1, faces3.shape[-2], 2, 1), dtype=jnp.float32) * 0.95,
+                    jnp.ones((1, faces3.shape[-2], 2, 1), dtype=jnp.float32) * 0.90,
+                    jnp.ones((1, faces3.shape[-2], 2, 1), dtype=jnp.float32) * 0.82,
                 ),
                 axis=-1,
             )

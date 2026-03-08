@@ -14,13 +14,13 @@ import jax
 import jax.numpy as jnp
 from tqdm import tqdm, trange
 
-from gradsim.assets.primitives import INT_TO_PRIMITIVE, get_primitive_obj
-from gradsim.bodies import RigidBody
-from gradsim.forces import ConstantForce
-from gradsim.renderutils import SoftRenderer, TriangleMesh
-from gradsim.simulator import Simulator
-from gradsim.utils import meshutils
-from gradsim.utils.h5 import HDF5Dataset
+from jaxsim.assets.primitives import INT_TO_PRIMITIVE, get_primitive_obj
+from jaxsim.bodies import RigidBody
+from jaxsim.forces import ConstantForce
+from jaxsim.renderutils import SoftRenderer, TriangleMesh
+from jaxsim.simulator import Simulator
+from jaxsim.utils import meshutils
+from jaxsim.utils.h5 import HDF5Dataset
 
 
 def _adam_init(params):

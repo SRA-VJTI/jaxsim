@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 from tqdm import trange
 
-from gradsim.renderutils import SoftRenderer, TriangleMesh
+from jaxsim.renderutils import SoftRenderer, TriangleMesh
 
 # Example script that uses SoftRas to render an image, given a mesh input
 

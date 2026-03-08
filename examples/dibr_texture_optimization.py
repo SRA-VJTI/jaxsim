@@ -12,8 +12,8 @@ import jax
 import jax.numpy as jnp
 from tqdm import tqdm, trange
 
-from gradsim.renderutils import TriangleMesh
-from gradsim.renderutils.dibr.renderer import Renderer as DIBRenderer
+from jaxsim.renderutils import TriangleMesh
+from jaxsim.renderutils.dibr.renderer import Renderer as DIBRenderer
 
 
 def _adam_init(params):

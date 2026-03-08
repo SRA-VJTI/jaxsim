@@ -4,7 +4,7 @@ Define simulation defaults.
 
 from collections import namedtuple
 
-from gradsim.assets.primitives import Primitive
+from jaxsim.assets.primitives import Primitive
 
 Defaults = namedtuple(
     "Defaults",

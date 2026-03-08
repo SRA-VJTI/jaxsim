@@ -9,9 +9,9 @@ import jax
 import jax.numpy as jnp
 from tqdm import tqdm, trange
 
-from gradsim.renderutils import SoftRenderer, TriangleMesh
-from gradsim.utils import meshutils
-from gradsim.utils.logging import write_imglist_to_gif
+from jaxsim.renderutils import SoftRenderer, TriangleMesh
+from jaxsim.utils import meshutils
+from jaxsim.utils.logging import write_imglist_to_gif
 
 
 def _adam_init(params):

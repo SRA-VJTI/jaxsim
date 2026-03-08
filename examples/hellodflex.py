@@ -4,7 +4,7 @@ A dflex smoketest
 
 from tqdm import trange
 
-from gradsim import dflex
+from jaxsim import dflex
 
 if __name__ == "__main__":
 

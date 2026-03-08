@@ -13,14 +13,14 @@ import jax
 import jax.numpy as jnp
 from tqdm import tqdm, trange
 
-from gradsim.bodies import RigidBody
-from gradsim.forces import ConstantForce
-from gradsim.renderutils import SoftRenderer, TriangleMesh
-from gradsim.renderutils.dibr.renderer import Renderer as DIBRenderer
-from gradsim.renderutils.dibr.utils.sphericalcoord import get_spherical_coords_x
-from gradsim.simulator import Simulator
-from gradsim.utils import meshutils
-from gradsim.utils.logging import write_imglist_to_gif
+from jaxsim.bodies import RigidBody
+from jaxsim.forces import ConstantForce
+from jaxsim.renderutils import SoftRenderer, TriangleMesh
+from jaxsim.renderutils.dibr.renderer import Renderer as DIBRenderer
+from jaxsim.renderutils.dibr.utils.sphericalcoord import get_spherical_coords_x
+from jaxsim.simulator import Simulator
+from jaxsim.utils import meshutils
+from jaxsim.utils.logging import write_imglist_to_gif
 
 
 def _adam_init(params):

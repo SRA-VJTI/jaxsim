@@ -1,7 +1,7 @@
 import pytest
 import jax.numpy as jnp
 
-from gradsim.bodies import RigidBody
+from jaxsim.bodies import RigidBody
 
 
 def test_assertions():
