@@ -1,7 +1,7 @@
 import numpy as np
 import jax.numpy as jnp
 
-from gradsim.forces import ConstantForce, Gravity, XForce, YForce
+from jaxsim.forces import ConstantForce, Gravity, XForce, YForce
 
 
 def test_constantforce():

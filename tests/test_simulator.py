@@ -1,8 +1,8 @@
 import jax.numpy as jnp
 
-from gradsim.bodies import RigidBody
-from gradsim.forces import Gravity
-from gradsim.simulator import Simulator
+from jaxsim.bodies import RigidBody
+from jaxsim.forces import Gravity
+from jaxsim.simulator import Simulator
 
 
 CUBE_VERTS = jnp.array(

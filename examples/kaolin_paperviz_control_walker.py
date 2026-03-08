@@ -12,9 +12,9 @@ from tqdm import tqdm, trange
 import kaolin as kal
 
 from argparsers import get_dflex_base_parser
-from gradsim import dflex as df
-from gradsim.renderutils import SoftRenderer
-from gradsim.utils.logging import write_imglist_to_dir, write_imglist_to_gif
+from jaxsim import dflex as df
+from jaxsim.renderutils import SoftRenderer
+from jaxsim.utils.logging import write_imglist_to_dir, write_imglist_to_gif
 try:
     from pxr import Usd, UsdGeom
 except ImportError:

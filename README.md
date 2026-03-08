@@ -1,199 +1,135 @@
-# gradsim
-
-> gradSim: Differentiable simulation for system identification and visuomotor control
+# JAXSIM
 
 <p align="center">
-	<img src="assets/walker.gif" />
+  <img src="assets/drop1.gif" width="320" />
 </p>
 
-**gradSim** is a unified differentiable rendering and multiphysics framework that allows solving a range of control and parameter estimation tasks (rigid bodies, deformable solids, and cloth) directly from images/video. Our unified computation graph — spanning from the dynamics and through the rendering process — enables learning in challenging visuomotor control tasks, without relying on state-based (3D) supervision, while obtaining performance competitive to or better than techniques that rely on precise 3D labels.
+**jaxsim** is a complete JAX rewrite of [gradSim](https://github.com/gradsim/gradsim), a unified differentiable rendering and multiphysics framework for solving parameter estimation and visuomotor control tasks directly from images and video. It supports rigid bodies, deformable solids, and cloth — all fully differentiable end-to-end through simulation and rendering.
 
-
-## Building the package
-
-### Quick Start (Recommended)
-
-#### Step 0: Create a virtual environment with uv
-
-We recommend using [`uv`](https://github.com/astral-sh/uv) for fast, reliable Python environment management. Tested with Python 3.9, 3.10, and 3.11.
-
-```bash
-# Install uv if you don't have it
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Create virtual environment
-uv venv --python 3.11 .venv
-source .venv/bin/activate
-```
-
-#### Step 1: Install PyTorch
-
-Install PyTorch with CUDA support:
-```bash
-uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-```
-
-For other CUDA versions, see [pytorch.org](https://pytorch.org/).
-
-#### Step 2: Install gradsim
-
-```bash
-uv pip install setuptools wheel ninja
-uv pip install -e . --no-build-isolation
-```
-
-#### Step 3: Verify installation
-
-```python
->>> import gradsim
->>> gradsim.__version__
-'0.0.4'
-```
-
-#### Step 4 (Optional): Setup USD/pxr for mesh loading
-
-If you need USD support for loading complex meshes:
-
-**Option A**: Use the provided installer:
-```bash
-./buildusd.sh
-source setenv.sh
-```
-
-**Option B**: If using Kaolin, configure paths:
-```bash
-cd path/to/kaolin/root/directory
-export KAOLIN_HOME=$PWD
-export PYTHONPATH=${KAOLIN_HOME}/build/target-deps/nv_usd/release/lib/python
-export LD_LIBRARY_PATH=${KAOLIN_HOME}/build/target-deps/nv_usd/release/lib/
-```
+The original gradSim was built on PyTorch + NVIDIA warp/dflex. This rewrite replaces everything with JAX: autodiff, JIT compilation, and physics integration are all handled natively in JAX with no CUDA kernel compilation required.
 
 ---
 
-### Alternative: Using conda
+## What's inside
 
-<details>
-<summary>Click to expand conda instructions</summary>
+| Module | Description |
+|--------|-------------|
+| `jaxsim.dflex` | JAX port of NVIDIA DFlex — cloth, FEM, rigid body physics with semi-implicit Euler integration |
+| `jaxsim.renderutils` | Soft rasterizer (Liu et al., ICCV 2019) and DIBR renderer, both in pure JAX |
+| `jaxsim.bodies` | Rigid body definitions with inertia and COM computation |
+| `jaxsim.engines` | Physics integrators (Euler) |
+| `jaxsim.utils` | Mesh utilities, quaternion math, GIF/image logging |
 
-#### Step 0: Create a conda environment
+---
 
-```bash
-conda create -n gradsim python=3.11
-conda activate gradsim
-```
+## Installation
 
-#### Step 1: Install PyTorch
-
-```bash
-conda install pytorch torchvision pytorch-cuda=12.1 -c pytorch -c nvidia
-```
-
-#### Step 2: Install gradsim
+Requires Python ≥ 3.9.
 
 ```bash
+# 1. Create a virtual environment
+python -m venv .venv && source .venv/bin/activate
+# or: uv venv --python 3.11 .venv && source .venv/bin/activate
+
+# 2. Install JAX (CPU)
+pip install jax jaxlib
+
+# For GPU (CUDA 12):
+# pip install -U "jax[cuda12]"
+
+# 3. Install jaxsim
 pip install -e .
 ```
 
-#### Step 3: Install Ninja
+## Quick start
 
-```bash
-conda install -c conda-forge ninja
+### Cloth falling on a sphere
+
+```python
+from jaxsim import dflex as df
+from jaxsim.renderutils import SoftRenderer
+from jaxsim.utils.logging import write_imglist_to_gif
+import math, jax.numpy as jnp
+
+# Build cloth
+builder = df.sim.ModelBuilder()
+builder.add_cloth_grid(
+    pos=(0.0, 2.0, 0.0),
+    rot=df.quat_from_axis_angle((1.0, 0.0, 0.0), -math.pi * 0.5),
+    vel=(0.0, 0.0, 0.0),
+    dim_x=10, dim_y=10, cell_x=0.14, cell_y=0.14, mass=0.3,
+)
+model = builder.finalize("cpu")
+model.ground = True
+
+integrator = df.sim.SemiImplicitIntegrator()
+state = model.state()
+
+# Step simulation
+for _ in range(100):
+    state = integrator.forward(model, state, dt=1/960)
 ```
 
-</details>
+See [`examples/demo_cloth_sphere.py`](examples/demo_cloth_sphere.py) for the full demo with sphere collision and GIF export.
 
 ---
 
-## Python 3.11 Compatibility
-
-This codebase has been updated for Python 3.11 compatibility:
-
-- **dflex module**: Updated AST handling for Python 3.9+ changes (`ast.Constant` vs `ast.Num`, subscript handling)
-- **Import system**: Replaced deprecated `imp` module with `importlib.util`
-- **Dependencies**: `py3ode` is now optional (requires system ODE library)
-
-### Known Limitations
-
-- **Kaolin**: NVIDIA Kaolin may have its own Python version requirements. Check [Kaolin docs](https://kaolin.readthedocs.io/) for compatibility.
-- **py3ode**: Optional dependency for ODE physics. Install separately if needed:
-  ```bash
-  # Requires libode-dev system package
-  sudo apt-get install libode-dev
-  uv pip install py3ode
-  ```
-
-
 ## Examples
 
-All examples are in the `examples` directory:
+Run any example from the repo root:
 
 ```bash
 cd examples
+../../jaxenv/bin/python3 <script>.py
 ```
 
-#### Basic demos
+### Physics demos
 
-```bash
-# dflex smoketest (spring-mass system)
-python hellodflex.py
+| Script | Description |
+|--------|-------------|
+| `hellodflex.py` | Spring-mass smoketest — 9-particle chain |
+| `demo_pendulum.py` | Simple pendulum with parameter optimization |
+| `demo_double_pendulum.py` | Double pendulum |
+| `demo_bounce2d.py` | 2D bouncing ball, optimize restitution |
+| `demo_tablecloth.py` | Flat cloth dropping onto a ground plane |
+| `demo_cloth_sphere.py` | Cloth draped over a static sphere (GIF output) |
 
-# Simple physics simulation
-python demo_pendulum.py
-python demo_double_pendulum.py
-python demo_bounce2d.py
-```
+### Parameter estimation
 
-#### Parameter estimation
+| Script | Description |
+|--------|-------------|
+| `demo_mass_known_shape.py` | Estimate mass from rendered video |
+| `demo_fem.py` | FEM material parameter optimization |
+| `demo_cloth.py` | Cloth velocity optimization from images |
 
-```bash
-# Estimate mass from video
-python demo_mass_known_shape.py
+### Visuomotor control
 
-# FEM parameter optimization
-python demo_fem.py
+| Script | Description |
+|--------|-------------|
+| `control_walker.py` | Deformable walker locomotion |
+| `control_cloth.py` | Cloth manipulation |
+| `control_fem.py` | Deformable gear control |
 
-# Cloth parameter optimization
-python demo_cloth.py
-```
+### Rendering
 
-#### Visuomotor control
+| Script | Description |
+|--------|-------------|
+| `softras_simple_render.py` | Soft rasterization forward pass |
+| `softras_texture_optimization.py` | Optimize texture from target image |
+| `dibr_forward_render.py` | DIBR forward render |
 
-```bash
-# Walker locomotion
-python control_walker.py
+---
 
-# Cloth manipulation
-python control_cloth.py
+## Key differences from gradSim (PyTorch)
 
-# Deformable object control
-python control_fem_gear.py
-```
+| | gradSim (original) | jaxsim (this repo) |
+|--|--|--|
+| Backend | PyTorch | JAX |
+| Physics | NVIDIA warp/dflex (C++ kernels) | Pure Python JAX |
+| Autodiff | `torch.autograd` | `jax.grad` / `jax.value_and_grad` |
+| GPU compilation | CUDA kernel build required | XLA JIT, no compilation step |
+| Install | Complex (CUDA toolkit, Kaolin) | `pip install jax jaxlib && pip install -e .` |
+| Cloth/FEM | dflex warp kernels | dflex ported to JAX arrays |
 
-For command-line options:
-```bash
-python <script>.py --help
-```
+---
 
-
-## Citing gradSim
-
-```bibtex
-@article{gradsim,
-  title   = {gradSim: Differentiable simulation for system identification and visuomotor control},
-  author  = {Krishna Murthy Jatavallabhula and Miles Macklin and Florian Golemo and Vikram Voleti and Linda Petrini and Martin Weiss and Breandan Considine and Jerome Parent-Levesque and Kevin Xie and Kenny Erleben and Liam Paull and Florian Shkurti and Derek Nowrouzezahrai and Sanja Fidler},
-  journal = {International Conference on Learning Representations (ICLR)},
-  year    = {2021},
-  url     = {https://openreview.net/forum?id=c_E8kFWfhp0},
-  pdf     = {https://openreview.net/pdf?id=c_E8kFWfhp0},
-}
-```
-
-If using Kaolin:
-```bibtex
-@misc{kaolin,
-  author = {Jatavallabhula, Krishna Murthy and others},
-  title = {Kaolin: A PyTorch Library for Accelerating 3D Deep Learning Research},
-  howpublished = {\url{https://github.com/NVIDIAGameWorks/kaolin}},
-  year = {2019}
-}
-```

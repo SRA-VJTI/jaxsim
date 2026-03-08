@@ -2,10 +2,10 @@ import glob
 import numpy as np
 import os
 
-from gradsim.assets.primitives import Primitive, get_primitive_obj
-from gradsim.urdf import fill_urdf, write_tmp_urdf
-from gradsim.utils.defaults import Defaults
-from gradsim.utils.misc import random_bright_color
+from jaxsim.assets.primitives import Primitive, get_primitive_obj
+from jaxsim.urdf import fill_urdf, write_tmp_urdf
+from jaxsim.utils.defaults import Defaults
+from jaxsim.utils.misc import random_bright_color
 
 
 # using this to send back samples

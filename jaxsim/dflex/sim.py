@@ -195,8 +195,8 @@ def integrate_particles(x, v, f, w, gravity, dt):
     """
     g = gravity[0] if gravity.ndim == 2 else gravity          # (3,)
     inv_mass = w[:, None]                                      # (N, 1)
-    # df.step(0 - inv_mass): guard term; >0 only when inv_mass<0 (unused for valid particles)
-    step_mask = (0.0 - inv_mass > 0.0).astype(jnp.float32)    # (N, 1)
+    # apply gravity only to mobile particles (inv_mass > 0); pinned particles have inv_mass == 0
+    step_mask = (inv_mass > 0.0).astype(jnp.float32)          # (N, 1)
     v_new = v + (f * inv_mass + g * step_mask) * dt
     x_new = x + v_new * dt
     return x_new, v_new

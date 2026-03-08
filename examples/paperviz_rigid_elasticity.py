@@ -9,11 +9,11 @@ import jax
 import jax.numpy as jnp
 from tqdm import tqdm, trange
 
-from gradsim import dflex as df
-from gradsim.renderutils import SoftRenderer, TriangleMesh
-from gradsim.utils import meshutils
-from gradsim.utils.logging import write_imglist_to_gif
-from gradsim.utils.quaternion import quaternion_to_rotmat
+from jaxsim import dflex as df
+from jaxsim.renderutils import SoftRenderer, TriangleMesh
+from jaxsim.utils import meshutils
+from jaxsim.utils.logging import write_imglist_to_gif
+from jaxsim.utils.quaternion import quaternion_to_rotmat
 try:
     from pxr import Usd, UsdGeom
 except ImportError:

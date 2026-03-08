@@ -1,5 +1,5 @@
-import gradsim
+import jaxsim
 
 
 def test_smoke():
-    assert gradsim.__version__
+    assert jaxsim.__version__

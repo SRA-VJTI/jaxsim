@@ -2,7 +2,7 @@ import math
 import numpy as np
 import jax.numpy as jnp
 
-from gradsim.utils import quaternion
+from jaxsim.utils import quaternion
 
 
 def test_normalize():

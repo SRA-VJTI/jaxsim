@@ -12,9 +12,9 @@ import jax
 import jax.numpy as jnp
 from tqdm import tqdm, trange
 
-from gradsim.renderutils import TriangleMesh
-from gradsim.renderutils.dibr.renderer import Renderer as DIBRenderer
-from gradsim.renderutils.dibr.utils.sphericalcoord import get_spherical_coords_x
+from jaxsim.renderutils import TriangleMesh
+from jaxsim.renderutils.dibr.renderer import Renderer as DIBRenderer
+from jaxsim.renderutils.dibr.utils.sphericalcoord import get_spherical_coords_x
 
 # Example script that uses DIB-R to deform a sphere mesh to approximate
 # the image of a banana.

@@ -2,7 +2,7 @@ import os
 import tempfile
 from datetime import datetime
 
-from gradsim.utils.misc import random_bright_color, random_string
+from jaxsim.utils.misc import random_bright_color, random_string
 
 URDF_TEMPLATE = """
 <?xml version="1.0" encoding="utf-8"?>

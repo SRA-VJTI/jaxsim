@@ -3,10 +3,10 @@ import os
 
 from setuptools import find_packages, setup
 
-PACKAGE_NAME = "gradsim"
-VERSION = "0.0.4"
-DESCRIPTION = "gradsim: Differentiable simulation for system identification and visuomotor control"
-URL = "<url.to.go.in.here>"
+PACKAGE_NAME = "jaxsim"
+VERSION = "0.1.0"
+DESCRIPTION = "jaxsim: JAX rewrite of gradSim — differentiable physics and rendering"
+URL = "https://github.com/gradsim/gradsim"
 AUTHOR = "Krishna Murthy Jatavallabhula"
 LICENSE = "(TBD)"
 DOWNLOAD_URL = ""

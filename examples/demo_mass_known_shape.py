@@ -11,11 +11,11 @@ import jax
 import jax.numpy as jnp
 from tqdm import tqdm, trange
 
-from gradsim.bodies import RigidBody
-from gradsim.forces import ConstantForce
-from gradsim.renderutils import SoftRenderer, TriangleMesh
-from gradsim.simulator import Simulator
-from gradsim.utils import meshutils
+from jaxsim.bodies import RigidBody
+from jaxsim.forces import ConstantForce
+from jaxsim.renderutils import SoftRenderer, TriangleMesh
+from jaxsim.simulator import Simulator
+from jaxsim.utils import meshutils
 
 
 def _adam_init(params):
