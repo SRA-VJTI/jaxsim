@@ -1,7 +1,7 @@
 # JAXSIM
 
 <p align="center">
-  <img src="assets/drop1.gif" width="320" />
+  <img src="assets/drop_trimmed.gif" width="320" />
 </p>
 
 **jaxsim** is a complete JAX rewrite of [gradSim](https://github.com/gradsim/gradsim), a unified differentiable rendering and multiphysics framework for solving parameter estimation and visuomotor control tasks directly from images and video. It supports rigid bodies, deformable solids, and cloth — all fully differentiable end-to-end through simulation and rendering.
